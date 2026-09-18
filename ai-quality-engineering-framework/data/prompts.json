@@ -1,0 +1,18 @@
+[
+  {
+    "id": "playwright_definition",
+    "prompt": "What is Playwright?",
+    "reference_answer": "Playwright is a browser automation framework used to automate and test web applications.",
+    "min_relevance": 8,
+    "min_accuracy": 8,
+    "min_completeness": 7
+  },
+  {
+    "id": "pytest_fixture",
+    "prompt": "Why are Pytest fixtures useful?",
+    "reference_answer": "Fixtures provide reusable setup and teardown and can inject shared test dependencies.",
+    "min_relevance": 8,
+    "min_accuracy": 8,
+    "min_completeness": 7
+  }
+]
