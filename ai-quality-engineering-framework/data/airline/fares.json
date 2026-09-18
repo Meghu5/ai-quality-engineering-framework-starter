@@ -1,0 +1,29 @@
+[
+  {
+    "fare_id": "FARE-AIQ-100-E",
+    "flight_id": "FL-AIQ-100",
+    "currency": "USD",
+    "fare_class": "E",
+    "base_amount": "850.00",
+    "taxes": "135.50",
+    "total_amount": "985.50"
+  },
+  {
+    "fare_id": "FARE-AIQ-200-B",
+    "flight_id": "FL-AIQ-200",
+    "currency": "USD",
+    "fare_class": "J",
+    "base_amount": "2400.00",
+    "taxes": "290.00",
+    "total_amount": "2690.00"
+  },
+  {
+    "fare_id": "FARE-AIQ-300-P",
+    "flight_id": "FL-AIQ-300",
+    "currency": "USD",
+    "fare_class": "W",
+    "base_amount": "1300.00",
+    "taxes": "180.00",
+    "total_amount": "1480.00"
+  }
+]

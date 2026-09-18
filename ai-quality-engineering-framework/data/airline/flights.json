@@ -1,0 +1,41 @@
+[
+  {
+    "flight_id": "FL-AIQ-100",
+    "carrier_code": "AIQ",
+    "flight_number": "100",
+    "origin": "JFK",
+    "destination": "LHR",
+    "departure_at": "2099-06-15T08:30:00Z",
+    "arrival_at": "2099-06-15T20:15:00Z",
+    "duration_minutes": 405,
+    "cabin": "ECONOMY",
+    "fare_id": "FARE-AIQ-100-E",
+    "available_seats": 7
+  },
+  {
+    "flight_id": "FL-AIQ-200",
+    "carrier_code": "AIQ",
+    "flight_number": "200",
+    "origin": "JFK",
+    "destination": "LHR",
+    "departure_at": "2099-06-15T12:00:00Z",
+    "arrival_at": "2099-06-15T23:35:00Z",
+    "duration_minutes": 395,
+    "cabin": "BUSINESS",
+    "fare_id": "FARE-AIQ-200-B",
+    "available_seats": 0
+  },
+  {
+    "flight_id": "FL-AIQ-300",
+    "carrier_code": "AIQ",
+    "flight_number": "300",
+    "origin": "LAX",
+    "destination": "NRT",
+    "departure_at": "2099-07-20T10:00:00Z",
+    "arrival_at": "2099-07-21T14:30:00Z",
+    "duration_minutes": 690,
+    "cabin": "PREMIUM_ECONOMY",
+    "fare_id": "FARE-AIQ-300-P",
+    "available_seats": 4
+  }
+]

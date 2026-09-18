@@ -1,4 +1,4 @@
-name: Phase 1 API Tests
+name: API Automation Tests
 
 on:
   push:
@@ -27,11 +27,15 @@ jobs:
 
       - name: Run deterministic Phase 1 API tests
         run: |
-          python -m pytest -m api -v --html=reports/api-report.html --self-contained-html
+          python -m pytest -m "api and not airline" -v --html=reports/api-report.html --self-contained-html
+
+      - name: Run deterministic Phase 2 airline API tests
+        run: |
+          python -m pytest -m "api and airline" -v --html=reports/airline-api-report.html --self-contained-html
 
       - name: Upload API report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: phase-1-api-report
+          name: api-test-reports
           path: ai-quality-engineering-framework/reports/

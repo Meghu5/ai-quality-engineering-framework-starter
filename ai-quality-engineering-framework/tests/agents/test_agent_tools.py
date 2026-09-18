@@ -1,6 +1,6 @@
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Future phase: agent testing is not implemented in Phase 1.")
+pytestmark = pytest.mark.skip(reason="Future phase: agent testing is not implemented yet.")
 
 
 @pytest.mark.agents

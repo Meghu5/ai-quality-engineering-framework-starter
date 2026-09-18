@@ -3,7 +3,7 @@
 Enterprise-grade portfolio project for building a scalable quality engineering framework around airline APIs, chatbot experiences, and future AI testing layers.
 
 ## Current Scope
-Phase 1 focuses on a deterministic API automation foundation:
+Phase 1 provides the deterministic API automation foundation:
 
 - Environment-driven settings
 - Reusable HTTPX API client
@@ -13,6 +13,14 @@ Phase 1 focuses on a deterministic API automation foundation:
 - Pytest fixtures with clean client lifecycle
 - Deterministic `/chat` API tests using mocked HTTP responses
 - HTML report generation for API evidence
+
+Phase 2 adds a realistic airline-domain API automation layer:
+
+- Airline service clients built on the reusable `ApiClient`
+- Pydantic models for flight search, availability, fares, passengers, and bookings
+- Deterministic airline test data
+- Business-rule assertions for flights, fares, availability, and booking/PNR validation
+- Positive and negative API tests for meaningful airline scenarios
 
 Future suites for UI, LLM, RAG, agents, and AI security are intentionally skipped until their phases are implemented.
 
@@ -51,14 +59,15 @@ API_AUTH_TOKEN=
 Do not commit real secrets. `API_AUTH_TOKEN` is optional and is only sent when configured.
 
 ## Deterministic Local Test Strategy
-Phase 1 API tests do not depend on a live production service. They use `httpx.MockTransport` to stub `/chat` responses inside the test process. This keeps:
+Phase 1 and Phase 2 API tests do not depend on a live production service. They use `httpx.MockTransport` to stub responses inside the test process. This keeps:
 
 - `python -m pytest -m api -v`
+- `python -m pytest -m "api and airline" -v`
 - `python -m pytest -m api --html=reports/api-report.html --self-contained-html`
 
 reproducible on a local machine and in CI.
 
-The mock is only a test transport. It is not an airline backend or chatbot implementation.
+The mocks are only test transports. They are not airline backend or chatbot implementations.
 
 ## Running Tests
 Collect tests:
@@ -67,7 +76,19 @@ Collect tests:
 python -m pytest --collect-only -q
 ```
 
-Run Phase 1 API tests:
+Run Phase 1 chat API tests:
+
+```powershell
+python -m pytest -m "api and not airline" -v
+```
+
+Run Phase 2 airline API tests:
+
+```powershell
+python -m pytest -m "api and airline" -v
+```
+
+Run all deterministic API tests:
 
 ```powershell
 python -m pytest -m api -v
@@ -77,6 +98,12 @@ Generate a Phase 1 HTML report:
 
 ```powershell
 python -m pytest -m api --html=reports/api-report.html --self-contained-html
+```
+
+Generate a Phase 2 airline API HTML report:
+
+```powershell
+python -m pytest -m "api and airline" --html=reports/airline-api-report.html --self-contained-html
 ```
 
 Run all currently available tests:
@@ -91,6 +118,12 @@ Future-phase tests are collected but skipped until their implementations exist.
 
 ## Test Markers
 - `api`: deterministic API tests
+- `airline`: airline-domain API tests
+- `flight`: flight search API tests
+- `availability`: flight availability API tests
+- `fare`: fare and pricing API tests
+- `passenger`: passenger API tests
+- `booking`: booking and PNR API tests
 - `ui`: Playwright UI tests
 - `llm`: semantic LLM quality tests
 - `rag`: RAG evaluation tests
@@ -105,26 +138,42 @@ ApiClient
   -> ChatClient
 ```
 
-Later phases can add service-specific clients without changing the base contract:
+Phase 2 extends the same pattern for airline-domain APIs:
 
 ```text
 ApiClient
-  -> FlightClient
-  -> BookingClient
-  -> PassengerClient
-  -> PaymentClient
   -> ChatClient
+  -> Airline clients
+       -> FlightClient
+       -> AvailabilityClient
+       -> FareClient
+       -> PassengerClient
+       -> BookingClient
 ```
+
+The current deterministic airline flow is:
+
+```text
+flight search -> availability -> fare -> passenger -> booking / PNR
+```
+
+Current limitations:
+
+- No real airline backend integration
+- No payment, ticketing, seats, baggage, check-in, refunds, or loyalty APIs yet
+- No UI/mobile/E2E integration yet
+- No LLM/RAG/agent implementation yet
 
 ## Roadmap
 1. Base API client, fixtures, deterministic API gates
-2. Playwright UI flow
-3. Mobile/Appium testing
-4. Airline business-domain E2E scenarios
-5. LLM semantic evaluation
-6. RAG retrieval and groundedness
-7. Agent/tool validation
-8. Kafka and event-driven tests
-9. Database and contract testing
-10. Security and performance testing
-11. Docker, Kubernetes, Jenkins, observability, and quality gates
+2. Airline API clients, domain models, and business-rule validations
+3. Playwright UI flow
+4. Mobile/Appium testing
+5. Airline business-domain E2E scenarios
+6. LLM semantic evaluation
+7. RAG retrieval and groundedness
+8. Agent/tool validation
+9. Kafka and event-driven tests
+10. Database and contract testing
+11. Security and performance testing
+12. Docker, Kubernetes, Jenkins, observability, and quality gates

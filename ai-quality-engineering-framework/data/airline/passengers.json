@@ -1,0 +1,14 @@
+[
+  {
+    "first_name": "Avery",
+    "last_name": "Stone",
+    "passenger_type": "ADULT",
+    "date_of_birth": "1988-04-12"
+  },
+  {
+    "first_name": "Mina",
+    "last_name": "Stone",
+    "passenger_type": "CHILD",
+    "date_of_birth": "2016-09-03"
+  }
+]

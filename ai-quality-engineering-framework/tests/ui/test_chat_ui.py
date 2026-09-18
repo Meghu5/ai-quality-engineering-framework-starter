@@ -2,7 +2,7 @@ import os
 import pytest
 from pages.chatbot_page import ChatbotPage
 
-pytestmark = pytest.mark.skip(reason="Future phase: UI testing is not implemented in Phase 1.")
+pytestmark = pytest.mark.skip(reason="Future phase: UI testing is not implemented yet.")
 
 
 @pytest.mark.ui
