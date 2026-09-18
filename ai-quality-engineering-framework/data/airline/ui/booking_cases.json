@@ -1,0 +1,10 @@
+{
+  "standard_booking": {
+    "flight_id": "AIQ101",
+    "fare_id": "FLEX",
+    "fare_name": "Flex",
+    "expected_pnr_pattern": "^[A-Z]{2}[0-9]{4}$",
+    "expected_pnr": "AB1234",
+    "expected_itinerary": "DXB to AUH | AIQ101"
+  }
+}

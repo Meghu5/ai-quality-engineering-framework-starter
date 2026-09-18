@@ -1,0 +1,41 @@
+name: Phase 3 UI Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ui-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-quality-engineering-framework
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Install Chromium
+        run: |
+          python -m playwright install chromium
+
+      - name: Run deterministic Phase 3 airline UI tests
+        run: |
+          python -m pytest -m "ui and airline" -v --html=reports/airline-ui-report.html --self-contained-html
+
+      - name: Upload UI report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: airline-ui-test-report
+          path: ai-quality-engineering-framework/reports/

@@ -22,14 +22,21 @@ Phase 2 adds a realistic airline-domain API automation layer:
 - Business-rule assertions for flights, fares, availability, and booking/PNR validation
 - Positive and negative API tests for meaningful airline scenarios
 
-Future suites for UI, LLM, RAG, agents, and AI security are intentionally skipped until their phases are implemented.
+Phase 3 adds deterministic airline UI automation:
+
+- A local static airline booking application rendered in the browser
+- Playwright page objects for search, flight selection, fares, passengers, review, and confirmation
+- Deterministic UI test data
+- End-to-end booking validation with PNR and itinerary assertions
+
+Future suites for LLM, RAG, agents, and AI security are intentionally skipped until their phases are implemented.
 
 ## Prerequisites
 - Python 3.14
 - Git
 - PowerShell or another terminal
 
-Playwright is listed for future UI work. Browser installation is only needed when UI tests are enabled:
+Playwright powers the Phase 3 UI suite. Install Chromium before running UI tests locally:
 
 ```powershell
 python -m playwright install chromium
@@ -69,6 +76,8 @@ reproducible on a local machine and in CI.
 
 The mocks are only test transports. They are not airline backend or chatbot implementations.
 
+Phase 3 UI tests do not depend on a live airline website. They exercise a local static HTML/JavaScript demo app under `test_apps/airline_ui/` using Playwright.
+
 ## Running Tests
 Collect tests:
 
@@ -94,6 +103,18 @@ Run all deterministic API tests:
 python -m pytest -m api -v
 ```
 
+Run Phase 3 airline UI tests:
+
+```powershell
+python -m pytest -m "ui and airline" -v
+```
+
+Run UI tests headed for debugging:
+
+```powershell
+python -m pytest -m "ui and airline" -v --headed
+```
+
 Generate a Phase 1 HTML report:
 
 ```powershell
@@ -104,6 +125,12 @@ Generate a Phase 2 airline API HTML report:
 
 ```powershell
 python -m pytest -m "api and airline" --html=reports/airline-api-report.html --self-contained-html
+```
+
+Generate a Phase 3 airline UI HTML report:
+
+```powershell
+python -m pytest -m "ui and airline" -v --html=reports/airline-ui-report.html --self-contained-html
 ```
 
 Run all currently available tests:
@@ -124,6 +151,7 @@ Future-phase tests are collected but skipped until their implementations exist.
 - `fare`: fare and pricing API tests
 - `passenger`: passenger API tests
 - `booking`: booking and PNR API tests
+- `e2e`: end-to-end workflow tests
 - `ui`: Playwright UI tests
 - `llm`: semantic LLM quality tests
 - `rag`: RAG evaluation tests
@@ -161,13 +189,42 @@ Current limitations:
 
 - No real airline backend integration
 - No payment, ticketing, seats, baggage, check-in, refunds, or loyalty APIs yet
-- No UI/mobile/E2E integration yet
+- UI automation uses a local deterministic demo app, not a production airline site
+- No mobile/Appium integration yet
 - No LLM/RAG/agent implementation yet
+
+Phase 3 UI structure:
+
+```text
+test_apps/airline_ui/
+  index.html
+  app.js
+  styles.css
+
+pages/airline/
+  HomePage
+  FlightResultsPage
+  FarePage
+  PassengerPage
+  ReviewBookingPage
+  ConfirmationPage
+```
+
+The local UI booking flow is:
+
+```text
+search -> flight results -> fare selection -> passenger details -> review -> confirmation / PNR
+```
+
+CI runs API and UI automation separately:
+
+- `.github/workflows/phase-1-api-tests.yml`: Phase 1 and Phase 2 deterministic API suites
+- `.github/workflows/phase-3-ui-tests.yml`: Phase 3 deterministic Playwright UI suite
 
 ## Roadmap
 1. Base API client, fixtures, deterministic API gates
 2. Airline API clients, domain models, and business-rule validations
-3. Playwright UI flow
+3. Playwright airline UI flow
 4. Mobile/Appium testing
 5. Airline business-domain E2E scenarios
 6. LLM semantic evaluation

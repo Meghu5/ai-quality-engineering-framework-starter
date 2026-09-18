@@ -1,0 +1,167 @@
+:root {
+  color-scheme: light;
+  font-family: Arial, Helvetica, sans-serif;
+  background: #f6f7f9;
+  color: #1f2933;
+}
+
+body {
+  margin: 0;
+}
+
+.app-shell {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.app-header {
+  border-bottom: 1px solid #d8dee6;
+  margin-bottom: 18px;
+}
+
+.eyebrow {
+  color: #52616f;
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+h1,
+h2 {
+  margin: 8px 0 16px;
+}
+
+.stepper {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+  margin-bottom: 18px;
+}
+
+.stepper span {
+  border: 1px solid #c9d2dc;
+  padding: 8px;
+  text-align: center;
+  background: #fff;
+  font-size: 0.85rem;
+}
+
+.stepper span.active {
+  background: #0f766e;
+  border-color: #0f766e;
+  color: #fff;
+}
+
+.view {
+  display: none;
+  background: #fff;
+  border: 1px solid #d8dee6;
+  padding: 20px;
+}
+
+.view.active {
+  display: block;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  font-weight: 700;
+}
+
+input,
+select,
+button {
+  font: inherit;
+}
+
+input,
+select {
+  border: 1px solid #aab7c4;
+  padding: 9px;
+}
+
+button {
+  background: #0f766e;
+  border: 1px solid #0f766e;
+  color: #fff;
+  cursor: pointer;
+  padding: 10px 14px;
+}
+
+button:hover {
+  background: #115e59;
+}
+
+.option-list {
+  display: grid;
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.option-card {
+  border: 1px solid #c9d2dc;
+  padding: 14px;
+}
+
+.option-card label {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-weight: 400;
+}
+
+.option-title {
+  display: block;
+  font-weight: 700;
+}
+
+.option-meta {
+  display: block;
+  color: #52616f;
+  margin-top: 4px;
+}
+
+.error {
+  color: #b42318;
+  min-height: 22px;
+  margin: 8px 0;
+  font-weight: 700;
+}
+
+.actions {
+  margin-top: 12px;
+}
+
+.summary {
+  display: grid;
+  gap: 12px;
+}
+
+.summary div {
+  border-bottom: 1px solid #e3e8ef;
+  padding-bottom: 8px;
+}
+
+dt {
+  color: #52616f;
+  font-weight: 700;
+}
+
+dd {
+  margin: 4px 0 0;
+}
+
+@media (max-width: 720px) {
+  .form-grid,
+  .stepper {
+    grid-template-columns: 1fr;
+  }
+}

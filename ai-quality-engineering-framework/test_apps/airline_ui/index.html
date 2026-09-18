@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AIQ Airways Booking Demo</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="app-header">
+        <p class="eyebrow">Local deterministic demo</p>
+        <h1>AIQ Airways</h1>
+      </header>
+
+      <nav class="stepper" aria-label="Booking progress">
+        <span data-testid="step-search" class="active">Search</span>
+        <span data-testid="step-results">Flights</span>
+        <span data-testid="step-fare">Fare</span>
+        <span data-testid="step-passenger">Passenger</span>
+        <span data-testid="step-review">Review</span>
+        <span data-testid="step-confirmation">Confirmation</span>
+      </nav>
+
+      <section id="search-view" class="view active" data-testid="search-view">
+        <h2>Find a flight</h2>
+        <form id="search-form" novalidate>
+          <div class="form-grid">
+            <label>
+              Origin
+              <select id="origin" data-testid="origin-input">
+                <option value="">Select origin</option>
+                <option value="DXB">Dubai (DXB)</option>
+                <option value="AUH">Abu Dhabi (AUH)</option>
+                <option value="DOH">Doha (DOH)</option>
+              </select>
+            </label>
+
+            <label>
+              Destination
+              <select id="destination" data-testid="destination-input">
+                <option value="">Select destination</option>
+                <option value="DXB">Dubai (DXB)</option>
+                <option value="AUH">Abu Dhabi (AUH)</option>
+                <option value="DOH">Doha (DOH)</option>
+              </select>
+            </label>
+
+            <label>
+              Departure date
+              <input id="departure-date" data-testid="departure-date-input" type="date" />
+            </label>
+
+            <label>
+              Passengers
+              <input id="passenger-count" data-testid="passenger-count-input" type="number" min="1" max="9" value="1" />
+            </label>
+          </div>
+
+          <div id="search-error" class="error" data-testid="search-error" role="alert"></div>
+          <button type="submit" data-testid="search-submit">Search flights</button>
+        </form>
+      </section>
+
+      <section id="results-view" class="view" data-testid="results-view">
+        <h2>Flight results</h2>
+        <p data-testid="results-route"></p>
+        <div id="flight-results" class="option-list" data-testid="flight-results"></div>
+        <div id="flight-error" class="error" data-testid="flight-error" role="alert"></div>
+        <div class="actions">
+          <button type="button" data-testid="continue-to-fares">Continue to fares</button>
+        </div>
+      </section>
+
+      <section id="fare-view" class="view" data-testid="fare-view">
+        <h2>Choose a fare</h2>
+        <p data-testid="selected-flight-summary"></p>
+        <div id="fare-options" class="option-list" data-testid="fare-options"></div>
+        <div id="fare-error" class="error" data-testid="fare-error" role="alert"></div>
+        <div class="actions">
+          <button type="button" data-testid="continue-to-passenger">Continue to passenger</button>
+        </div>
+      </section>
+
+      <section id="passenger-view" class="view" data-testid="passenger-view">
+        <h2>Passenger details</h2>
+        <form id="passenger-form" novalidate>
+          <div class="form-grid">
+            <label>
+              First name
+              <input id="first-name" data-testid="first-name-input" autocomplete="given-name" />
+            </label>
+
+            <label>
+              Last name
+              <input id="last-name" data-testid="last-name-input" autocomplete="family-name" />
+            </label>
+
+            <label>
+              Date of birth
+              <input id="date-of-birth" data-testid="date-of-birth-input" type="date" />
+            </label>
+
+            <label>
+              Passenger type
+              <select id="passenger-type" data-testid="passenger-type-input">
+                <option value="">Select type</option>
+                <option value="ADULT">Adult</option>
+                <option value="CHILD">Child</option>
+                <option value="INFANT">Infant</option>
+              </select>
+            </label>
+          </div>
+
+          <div id="passenger-error" class="error" data-testid="passenger-error" role="alert"></div>
+          <button type="submit" data-testid="continue-to-review">Review booking</button>
+        </form>
+      </section>
+
+      <section id="review-view" class="view" data-testid="review-view">
+        <h2>Review booking</h2>
+        <dl class="summary">
+          <div>
+            <dt>Itinerary</dt>
+            <dd data-testid="review-itinerary"></dd>
+          </div>
+          <div>
+            <dt>Flight</dt>
+            <dd data-testid="review-flight"></dd>
+          </div>
+          <div>
+            <dt>Fare</dt>
+            <dd data-testid="review-fare"></dd>
+          </div>
+          <div>
+            <dt>Passenger</dt>
+            <dd data-testid="review-passenger"></dd>
+          </div>
+          <div>
+            <dt>Total</dt>
+            <dd data-testid="review-total"></dd>
+          </div>
+        </dl>
+        <div id="review-error" class="error" data-testid="review-error" role="alert"></div>
+        <button type="button" data-testid="confirm-booking">Confirm booking</button>
+      </section>
+
+      <section id="confirmation-view" class="view" data-testid="confirmation-view">
+        <h2>Booking confirmed</h2>
+        <p data-testid="confirmation-message">Your booking is confirmed.</p>
+        <dl class="summary">
+          <div>
+            <dt>PNR</dt>
+            <dd data-testid="confirmation-pnr"></dd>
+          </div>
+          <div>
+            <dt>Itinerary</dt>
+            <dd data-testid="confirmation-itinerary"></dd>
+          </div>
+          <div>
+            <dt>Passenger</dt>
+            <dd data-testid="confirmation-passenger"></dd>
+          </div>
+          <div>
+            <dt>Fare</dt>
+            <dd data-testid="confirmation-fare"></dd>
+          </div>
+        </dl>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

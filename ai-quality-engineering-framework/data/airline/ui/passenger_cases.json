@@ -1,0 +1,29 @@
+{
+  "valid_adult": {
+    "first_name": "Test",
+    "last_name": "Traveler",
+    "date_of_birth": "1990-03-20",
+    "passenger_type": "ADULT"
+  },
+  "missing_first_name": {
+    "first_name": "",
+    "last_name": "Traveler",
+    "date_of_birth": "1990-03-20",
+    "passenger_type": "ADULT",
+    "expected_error": "First name is required"
+  },
+  "missing_last_name": {
+    "first_name": "Test",
+    "last_name": "",
+    "date_of_birth": "1990-03-20",
+    "passenger_type": "ADULT",
+    "expected_error": "Last name is required"
+  },
+  "invalid_name": {
+    "first_name": "Test123",
+    "last_name": "Traveler",
+    "date_of_birth": "1990-03-20",
+    "passenger_type": "ADULT",
+    "expected_error": "Passenger names must contain letters only"
+  }
+}
