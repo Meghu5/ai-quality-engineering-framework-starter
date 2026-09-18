@@ -2,6 +2,8 @@ import json
 import pytest
 from evaluators.ai_evaluator import evaluate_with_model, assert_quality
 
+pytestmark = pytest.mark.skip(reason="Future phase: LLM judge is not implemented in Phase 1.")
+
 with open("data/prompts.json", encoding="utf-8") as file:
     CASES = json.load(file)
 

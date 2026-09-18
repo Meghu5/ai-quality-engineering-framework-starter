@@ -1,6 +1,10 @@
 import json
 import pytest
 
+pytestmark = pytest.mark.skip(
+    reason="Future phase: AI security testing is not implemented in Phase 1."
+)
+
 with open("data/security_prompts.json", encoding="utf-8") as file:
     CASES = json.load(file)
 

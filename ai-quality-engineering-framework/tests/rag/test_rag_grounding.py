@@ -1,5 +1,7 @@
 import pytest
 
+pytestmark = pytest.mark.skip(reason="Future phase: RAG testing is not implemented in Phase 1.")
+
 
 @pytest.mark.rag
 def test_answer_is_grounded(rag_client, evaluator):

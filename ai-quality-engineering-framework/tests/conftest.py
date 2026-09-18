@@ -1,21 +1,29 @@
-import os
 import pytest
-from dotenv import load_dotenv
+
+from clients.api_client import ApiClient
 from clients.chat_client import ChatClient
-
-load_dotenv()
-
-
-@pytest.fixture(scope="session")
-def chat_base_url():
-    return os.getenv("CHAT_BASE_URL", "http://localhost:8000")
+from config.settings import Settings
 
 
 @pytest.fixture(scope="session")
-def chat_client(chat_base_url):
-    client = ChatClient(chat_base_url)
+def settings():
+    return Settings.from_env()
+
+
+@pytest.fixture(scope="session")
+def api_client(settings):
+    client = ApiClient(
+        settings.api_base_url,
+        timeout=settings.api_timeout_seconds,
+        auth_token=settings.api_auth_token,
+    )
     yield client
     client.close()
+
+
+@pytest.fixture(scope="session")
+def chat_client(api_client):
+    return ChatClient(api_client)
 
 
 @pytest.fixture

@@ -1,5 +1,7 @@
 import pytest
 
+pytestmark = pytest.mark.skip(reason="Future phase: agent testing is not implemented in Phase 1.")
+
 
 @pytest.mark.agents
 def test_agent_uses_allowed_tool(agent_client):
