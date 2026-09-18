@@ -29,6 +29,13 @@ Phase 3 adds deterministic airline UI automation:
 - Deterministic UI test data
 - End-to-end booking validation with PNR and itinerary assertions
 
+Phase 4 adds API + UI E2E orchestration:
+
+- API-prepared airline state validated through the browser journey
+- Browser-created airline bookings validated against API-domain responses
+- Cross-layer consistency checks for flight, fare, passenger, PNR, and itinerary values
+- Shared deterministic API transport and E2E helpers for reproducible orchestration
+
 Future suites for LLM, RAG, agents, and AI security are intentionally skipped until their phases are implemented.
 
 ## Prerequisites
@@ -78,6 +85,8 @@ The mocks are only test transports. They are not airline backend or chatbot impl
 
 Phase 3 UI tests do not depend on a live airline website. They exercise a local static HTML/JavaScript demo app under `test_apps/airline_ui/` using Playwright.
 
+Phase 4 E2E tests intentionally combine the deterministic airline API clients with the local Playwright UI. They do not use a production airline site, external API, database, or web server.
+
 ## Running Tests
 Collect tests:
 
@@ -109,6 +118,12 @@ Run Phase 3 airline UI tests:
 python -m pytest -m "ui and airline" -v
 ```
 
+Run Phase 4 airline API + UI E2E tests:
+
+```powershell
+python -m pytest -m e2e -v
+```
+
 Run UI tests headed for debugging:
 
 ```powershell
@@ -131,6 +146,12 @@ Generate a Phase 3 airline UI HTML report:
 
 ```powershell
 python -m pytest -m "ui and airline" -v --html=reports/airline-ui-report.html --self-contained-html
+```
+
+Generate a Phase 4 airline E2E HTML report:
+
+```powershell
+python -m pytest -m e2e -v --html=reports/airline-e2e-report.html --self-contained-html
 ```
 
 Run all currently available tests:
@@ -216,17 +237,34 @@ The local UI booking flow is:
 search -> flight results -> fare selection -> passenger details -> review -> confirmation / PNR
 ```
 
+Phase 4 orchestrates both layers without making either layer depend on the other:
+
+```text
+API -> passenger/booking creation -> browser booking journey -> consistency assertions
+UI  -> browser booking journey -> API booking creation -> consistency assertions
+```
+
+The shared deterministic E2E contract validates:
+
+- origin and destination
+- flight identifier
+- fare identifier, currency, and total
+- passenger name
+- PNR
+- final itinerary
+
 CI runs API and UI automation separately:
 
 - `.github/workflows/phase-1-api-tests.yml`: Phase 1 and Phase 2 deterministic API suites
 - `.github/workflows/phase-3-ui-tests.yml`: Phase 3 deterministic Playwright UI suite
+- `.github/workflows/phase-4-e2e-tests.yml`: Phase 4 deterministic API + UI E2E suite
 
 ## Roadmap
 1. Base API client, fixtures, deterministic API gates
 2. Airline API clients, domain models, and business-rule validations
 3. Playwright airline UI flow
-4. Mobile/Appium testing
-5. Airline business-domain E2E scenarios
+4. Airline API + UI E2E orchestration
+5. Mobile/Appium testing
 6. LLM semantic evaluation
 7. RAG retrieval and groundedness
 8. Agent/tool validation

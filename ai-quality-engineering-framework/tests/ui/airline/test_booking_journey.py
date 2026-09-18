@@ -5,7 +5,6 @@ from utils.airline.ui_assertions import assert_confirmation, assert_review_summa
 
 @pytest.mark.ui
 @pytest.mark.airline
-@pytest.mark.e2e
 @pytest.mark.booking
 def test_airline_booking_journey_generates_pnr_and_final_itinerary(
     airline_home_page,
@@ -50,6 +49,7 @@ def test_airline_booking_journey_generates_pnr_and_final_itinerary(
         flight_id=booking["flight_id"],
         fare_name=booking["fare_name"],
         passenger_name=passenger_name,
+        currency=booking["expected_currency"],
     )
 
     review_booking_page.confirm_booking()
@@ -60,4 +60,5 @@ def test_airline_booking_journey_generates_pnr_and_final_itinerary(
         itinerary=booking["expected_itinerary"],
         passenger_name=passenger_name,
         fare_name=booking["fare_name"],
+        fare_id=booking["fare_id"],
     )

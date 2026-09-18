@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import date
 from pathlib import Path
 
 import pytest
+from playwright.sync_api import Page
 
 from clients.airline import (
     AvailabilityClient,
@@ -13,16 +13,24 @@ from clients.airline import (
     PassengerClient,
 )
 from clients.api_client import ApiClient
-from models.airline.common import Cabin, PassengerType, TripType
-from models.airline.flight import FlightSearchRequest
-from models.airline.passenger import PassengerRequest
+from pages.airline import (
+    ConfirmationPage,
+    FarePage,
+    FlightResultsPage,
+    HomePage,
+    PassengerPage,
+    ReviewBookingPage,
+)
 from utils.airline.deterministic_api import (
     deterministic_airline_transport,
     load_airline_json,
 )
+from utils.airline.e2e_helpers import AirlineE2EContext, build_e2e_context
 
 
-DATA_DIR = Path(__file__).resolve().parents[3] / "data" / "airline"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+DATA_DIR = PROJECT_ROOT / "data" / "airline"
+AIRLINE_UI_APP = PROJECT_ROOT / "test_apps" / "airline_ui" / "index.html"
 
 
 @pytest.fixture(scope="session")
@@ -78,28 +86,46 @@ def booking_client(airline_api_client):
 
 
 @pytest.fixture
-def future_departure_date() -> date:
-    return date(2099, 6, 15)
-
-
-@pytest.fixture
-def flight_search_request(future_departure_date):
-    return FlightSearchRequest(
-        origin="JFK",
-        destination="LHR",
-        departure_date=future_departure_date,
-        passengers=1,
-        cabin=Cabin.ECONOMY,
-        trip_type=TripType.ONE_WAY,
+def e2e_context(
+    airline_flights,
+    airline_fares,
+    passenger_payloads,
+) -> AirlineE2EContext:
+    return build_e2e_context(
+        flights=airline_flights,
+        fares=airline_fares,
+        passenger_payload=passenger_payloads[0],
     )
 
 
 @pytest.fixture
-def passenger_request(passenger_payloads):
-    payload = passenger_payloads[0]
-    return PassengerRequest(
-        first_name=payload["first_name"],
-        last_name=payload["last_name"],
-        passenger_type=PassengerType(payload["passenger_type"]),
-        date_of_birth=date.fromisoformat(payload["date_of_birth"]),
-    )
+def airline_home_page(page: Page) -> HomePage:
+    page.set_default_timeout(5000)
+    home_page = HomePage(page)
+    home_page.open(AIRLINE_UI_APP)
+    return home_page
+
+
+@pytest.fixture
+def flight_results_page(page: Page) -> FlightResultsPage:
+    return FlightResultsPage(page)
+
+
+@pytest.fixture
+def fare_page(page: Page) -> FarePage:
+    return FarePage(page)
+
+
+@pytest.fixture
+def passenger_page(page: Page) -> PassengerPage:
+    return PassengerPage(page)
+
+
+@pytest.fixture
+def review_booking_page(page: Page) -> ReviewBookingPage:
+    return ReviewBookingPage(page)
+
+
+@pytest.fixture
+def confirmation_page(page: Page) -> ConfirmationPage:
+    return ConfirmationPage(page)

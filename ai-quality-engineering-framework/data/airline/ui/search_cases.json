@@ -1,42 +1,42 @@
 {
   "valid_one_way": {
-    "origin": "DXB",
-    "destination": "AUH",
+    "origin": "JFK",
+    "destination": "LHR",
     "departure_date": "2099-06-15",
     "passengers": 1,
-    "expected_route": "DXB to AUH"
+    "expected_route": "JFK to LHR"
   },
   "missing_origin": {
     "origin": "",
-    "destination": "AUH",
+    "destination": "LHR",
     "departure_date": "2099-06-15",
     "passengers": 1,
     "expected_error": "Origin is required"
   },
   "missing_destination": {
-    "origin": "DXB",
+    "origin": "JFK",
     "destination": "",
     "departure_date": "2099-06-15",
     "passengers": 1,
     "expected_error": "Destination is required"
   },
   "same_origin_destination": {
-    "origin": "DXB",
-    "destination": "DXB",
+    "origin": "JFK",
+    "destination": "JFK",
     "departure_date": "2099-06-15",
     "passengers": 1,
     "expected_error": "Origin and destination must be different"
   },
   "past_departure": {
-    "origin": "DXB",
-    "destination": "AUH",
+    "origin": "JFK",
+    "destination": "LHR",
     "departure_date": "2000-01-01",
     "passengers": 1,
     "expected_error": "Departure date cannot be in the past"
   },
   "invalid_passenger_count": {
-    "origin": "DXB",
-    "destination": "AUH",
+    "origin": "JFK",
+    "destination": "LHR",
     "departure_date": "2099-06-15",
     "passengers": 0,
     "expected_error": "Passenger count must be between 1 and 9"

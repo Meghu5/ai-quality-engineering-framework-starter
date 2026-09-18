@@ -2,52 +2,61 @@ const todayIso = () => new Date().toISOString().slice(0, 10);
 
 const flights = [
   {
-    id: "AIQ101",
-    origin: "DXB",
-    destination: "AUH",
-    departure: "09:00",
-    arrival: "10:05",
-    duration: "1h 05m",
-    aircraft: "A320",
+    id: "FL-AIQ-100",
+    number: "AIQ100",
+    origin: "JFK",
+    destination: "LHR",
+    departure: "08:30",
+    arrival: "20:15",
+    duration: "6h 45m",
+    aircraft: "787-9",
   },
   {
-    id: "AIQ205",
-    origin: "DXB",
-    destination: "AUH",
-    departure: "14:30",
-    arrival: "15:35",
-    duration: "1h 05m",
-    aircraft: "A321",
+    id: "FL-AIQ-300",
+    number: "AIQ300",
+    origin: "LAX",
+    destination: "NRT",
+    departure: "10:00",
+    arrival: "14:30",
+    duration: "11h 30m",
+    aircraft: "777-300ER",
   },
   {
-    id: "AIQ310",
-    origin: "AUH",
-    destination: "DXB",
-    departure: "17:15",
-    arrival: "18:20",
-    duration: "1h 05m",
-    aircraft: "A320",
+    id: "FL-AIQ-200",
+    number: "AIQ200",
+    origin: "JFK",
+    destination: "LHR",
+    departure: "12:00",
+    arrival: "23:35",
+    duration: "6h 35m",
+    aircraft: "A350-900",
   },
 ];
 
 const fares = [
   {
-    id: "ECONOMY",
+    id: "FARE-AIQ-100-E",
     name: "Economy",
-    price: 320,
-    benefits: "Cabin bag, standard seat",
+    flightId: "FL-AIQ-100",
+    currency: "USD",
+    price: 985.5,
+    benefits: "Economy cabin, checked bag",
   },
   {
-    id: "FLEX",
-    name: "Flex",
-    price: 460,
-    benefits: "Checked bag, flexible change",
+    id: "FARE-AIQ-300-P",
+    name: "Premium Economy",
+    flightId: "FL-AIQ-300",
+    currency: "USD",
+    price: 1480,
+    benefits: "Premium seat, checked bag",
   },
   {
-    id: "BUSINESS",
+    id: "FARE-AIQ-200-B",
     name: "Business",
-    price: 980,
-    benefits: "Priority boarding, lounge access",
+    flightId: "FL-AIQ-200",
+    currency: "USD",
+    price: 2690,
+    benefits: "Business cabin, lounge access",
   },
 ];
 
@@ -147,14 +156,16 @@ function renderFares() {
     `${state.selectedFlight.id} ${routeLabel(state.selectedFlight.origin, state.selectedFlight.destination)}`;
   const options = byTestId("fare-options");
   options.innerHTML = "";
-  fares.forEach((fare) => {
+  fares
+    .filter((fare) => fare.flightId === state.selectedFlight.id)
+    .forEach((fare) => {
     const card = document.createElement("article");
     card.className = "option-card";
     card.innerHTML = `
       <label>
         <input type="radio" name="fare" value="${fare.id}" data-testid="fare-option-${fare.id}" />
         <span>
-          <span class="option-title">${fare.name} - AED ${fare.price}</span>
+          <span class="option-title">${fare.name} (${fare.id}) - ${fare.currency} ${fare.price.toFixed(2)}</span>
           <span class="option-meta">${fare.benefits}</span>
         </span>
       </label>
@@ -168,21 +179,23 @@ function renderReview() {
     `${routeLabel(state.search.origin, state.search.destination)} on ${state.search.departureDate}`;
   byTestId("review-flight").textContent =
     `${state.selectedFlight.id} ${state.selectedFlight.departure} - ${state.selectedFlight.arrival}`;
-  byTestId("review-fare").textContent = `${state.selectedFare.name} AED ${state.selectedFare.price}`;
+  byTestId("review-fare").textContent =
+    `${state.selectedFare.name} (${state.selectedFare.id}) ${state.selectedFare.currency} ${state.selectedFare.price.toFixed(2)}`;
   byTestId("review-passenger").textContent =
     `${state.passenger.firstName} ${state.passenger.lastName} (${state.passenger.type})`;
-  byTestId("review-total").textContent = `AED ${state.selectedFare.price * state.search.passengers}`;
+  byTestId("review-total").textContent =
+    `${state.selectedFare.currency} ${(state.selectedFare.price * state.search.passengers).toFixed(2)}`;
 }
 
 function renderConfirmation() {
-  const pnr = "AB1234";
+  const pnr = "AIQ7K2";
   byTestId("confirmation-pnr").textContent = pnr;
   byTestId("confirmation-itinerary").textContent =
     `${routeLabel(state.search.origin, state.search.destination)} | ${state.selectedFlight.id}`;
   byTestId("confirmation-passenger").textContent =
     `${state.passenger.firstName} ${state.passenger.lastName}`;
   byTestId("confirmation-fare").textContent =
-    `${state.selectedFare.name} | AED ${state.selectedFare.price}`;
+    `${state.selectedFare.name} | ${state.selectedFare.id} | ${state.selectedFare.currency} ${state.selectedFare.price.toFixed(2)}`;
 }
 
 document.getElementById("departure-date").min = todayIso();

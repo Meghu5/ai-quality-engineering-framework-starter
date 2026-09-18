@@ -41,13 +41,14 @@ def assert_review_summary(
     flight_id: str,
     fare_name: str,
     passenger_name: str,
+    currency: str,
 ) -> None:
     expect(review_page.review_view).to_be_visible()
     expect(review_page.itinerary).to_contain_text(route)
     expect(review_page.flight).to_contain_text(flight_id)
     expect(review_page.fare).to_contain_text(fare_name)
     expect(review_page.passenger).to_contain_text(passenger_name)
-    expect(review_page.total).to_contain_text("AED")
+    expect(review_page.total).to_contain_text(currency)
 
 
 def assert_confirmation(
@@ -57,6 +58,7 @@ def assert_confirmation(
     itinerary: str,
     passenger_name: str,
     fare_name: str,
+    fare_id: str | None = None,
 ) -> None:
     expect(confirmation_page.confirmation_view).to_be_visible()
     expect(confirmation_page.message).to_have_text("Your booking is confirmed.")
@@ -67,3 +69,5 @@ def assert_confirmation(
     expect(confirmation_page.itinerary).to_have_text(itinerary)
     expect(confirmation_page.passenger).to_have_text(passenger_name)
     expect(confirmation_page.fare).to_contain_text(fare_name)
+    if fare_id is not None:
+        expect(confirmation_page.fare).to_contain_text(fare_id)
