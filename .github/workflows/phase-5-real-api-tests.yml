@@ -1,15 +1,18 @@
-name: API Automation Tests
+name: Phase 5 Real API Tests
 
 on:
-  push:
+  workflow_dispatch:
   pull_request:
+  push:
 
 jobs:
-  api-tests:
+  real-api-tests:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: ai-quality-engineering-framework
+    env:
+      DUFFEL_ACCESS_TOKEN: ${{ secrets.DUFFEL_ACCESS_TOKEN }}
 
     steps:
       - name: Checkout repository
@@ -25,17 +28,19 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Run deterministic Phase 1 API tests
+      - name: Run Duffel TEST/SANDBOX integration tests
+        if: env.DUFFEL_ACCESS_TOKEN != ''
         run: |
-          python -m pytest -m "api and not airline" -v --html=reports/api-report.html --self-contained-html
+          python -m pytest -m real_api -v --html=reports/duffel-real-api-report.html --self-contained-html
 
-      - name: Run deterministic Phase 2 airline API tests
+      - name: Skip real API tests without Duffel secret
+        if: env.DUFFEL_ACCESS_TOKEN == ''
         run: |
-          python -m pytest -m "api and airline and not real_api" -v --html=reports/airline-api-report.html --self-contained-html
+          echo "DUFFEL_ACCESS_TOKEN secret is not configured; skipping Phase 5 real API tests."
 
-      - name: Upload API report
+      - name: Upload real API report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: api-test-reports
+          name: duffel-real-api-test-report
           path: ai-quality-engineering-framework/reports/

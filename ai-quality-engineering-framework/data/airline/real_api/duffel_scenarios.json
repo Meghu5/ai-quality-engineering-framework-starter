@@ -1,0 +1,35 @@
+{
+  "search_with_offers": {
+    "description": "Duffel TEST/SANDBOX search expected to return offers",
+    "origin": "JFK",
+    "destination": "EWR",
+    "departure_days_from_today": 45,
+    "passenger_type": "adult",
+    "cabin_class": "economy"
+  },
+  "no_flights": {
+    "description": "Official Duffel test scenario: PVD to RAI returns no offers",
+    "origin": "PVD",
+    "destination": "RAI",
+    "departure_days_from_today": 45,
+    "passenger_type": "adult",
+    "cabin_class": "economy"
+  },
+  "hold_order": {
+    "description": "Official Duffel test scenario: JFK to EWR returns hold-order-capable Duffel Airways offers",
+    "origin": "JFK",
+    "destination": "EWR",
+    "departure_days_from_today": 45,
+    "passenger_type": "adult",
+    "cabin_class": "economy"
+  },
+  "test_passenger": {
+    "title": "mr",
+    "given_name": "Avery",
+    "family_name": "Stone",
+    "born_on": "1988-04-12",
+    "gender": "m",
+    "email": "avery.stone@example.com",
+    "phone_number": "+442080040001"
+  }
+}

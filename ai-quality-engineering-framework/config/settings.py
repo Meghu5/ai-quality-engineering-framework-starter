@@ -27,6 +27,9 @@ class Settings:
     api_auth_token: str | None
     api_latency_threshold_seconds: float
     ui_base_url: str
+    duffel_base_url: str
+    duffel_access_token: str | None
+    duffel_timeout_seconds: float
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -37,6 +40,8 @@ class Settings:
             "CHAT_BASE_URL", api_base_url
         )
         api_auth_token = os.getenv("API_AUTH_TOKEN")
+        duffel_base_url = os.getenv("DUFFEL_BASE_URL", "https://api.duffel.com")
+        duffel_access_token = os.getenv("DUFFEL_ACCESS_TOKEN")
 
         return cls(
             api_base_url=api_base_url.rstrip("/"),
@@ -46,4 +51,7 @@ class Settings:
                 "API_LATENCY_THRESHOLD_SECONDS", 5.0
             ),
             ui_base_url=ui_base_url.rstrip("/"),
+            duffel_base_url=duffel_base_url.rstrip("/"),
+            duffel_access_token=duffel_access_token or None,
+            duffel_timeout_seconds=_get_float("DUFFEL_TIMEOUT_SECONDS", 30.0),
         )
