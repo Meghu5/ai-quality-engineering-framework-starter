@@ -42,7 +42,7 @@ class DuffelSegment(BaseModel):
 class DuffelSlice(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    id: str
+    id: str | None = None
     origin: DuffelAirport
     destination: DuffelAirport
     segments: list[DuffelSegment] = Field(default_factory=list)

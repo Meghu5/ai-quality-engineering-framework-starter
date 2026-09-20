@@ -1,0 +1,24 @@
+{
+  "valid_user": {
+    "token": "valid-user-token",
+    "subject": "user-001",
+    "owned_passenger_id": "PAX-SEC-0001",
+    "owned_booking_id": "BKG-SEC-0001"
+  },
+  "another_user": {
+    "token": "another-user-token",
+    "subject": "user-002",
+    "owned_passenger_id": "PAX-SEC-0002",
+    "owned_booking_id": "BKG-SEC-0002"
+  },
+  "admin": {
+    "token": "admin-test-token",
+    "subject": "admin-001"
+  },
+  "invalid": {
+    "token": "invalid-test-token"
+  },
+  "expired": {
+    "token": "expired-test-token"
+  }
+}

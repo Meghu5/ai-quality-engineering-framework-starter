@@ -50,7 +50,15 @@ Phase 6 adds k6 performance testing:
 - Reusable k6 client, data, assertions, thresholds, and business metrics
 - CI smoke performance gate that does not require Duffel credentials
 
-Future suites for LLM, RAG, agents, and AI security are intentionally skipped until their phases are implemented.
+Phase 7 adds deterministic API security testing:
+
+- Authentication and authorization checks against the local airline HTTP target
+- Safe injection-like and malformed input payloads treated only as strings
+- BOLA-style passenger and booking access checks using synthetic identities
+- Security header, HTTP method, data exposure, and abuse-case regression tests
+- Optional OWASP ZAP baseline workflow against the local target only
+
+Future suites for LLM, RAG, and agents are intentionally skipped until their phases are implemented.
 
 ## Prerequisites
 - Python 3.14
@@ -191,6 +199,60 @@ The performance layer measures HTTP timing plus business success metrics:
 
 Thresholds include error rate, checks, and p90/p95/p99 latency. They are engineering demonstration thresholds for the deterministic local service, not production SLAs.
 
+## Phase 7 Security Testing and API Security
+Phase 7 introduces a safe security testing layer for the airline API framework. It does not probe Duffel, production systems, public airline APIs, or any external target.
+
+The security test target is the same deterministic local HTTP service used by Phase 6, started in explicit security mode:
+
+```powershell
+python -m performance.apps.deterministic_airline_service --host 127.0.0.1 --port 8001 --security-mode
+```
+
+Security mode enables a minimal deterministic authentication and authorization model using synthetic tokens:
+
+- `valid-user-token`
+- `another-user-token`
+- `admin-test-token`
+- `invalid-test-token`
+- `expired-test-token`
+
+These are not secrets and are never sent to an external service.
+
+Phase 7 covers:
+
+- Broken authentication: missing, malformed, invalid, and expired tokens
+- Broken object level authorization: cross-user passenger and booking access
+- Broken function level authorization: unsupported state-transition methods
+- Broken object property level authorization: unexpected fields and excessive response fields
+- Unrestricted resource consumption: bounded oversized input and deterministic rate-limit probe
+- Security misconfiguration: required local security headers
+- Unrestricted access to sensitive business flows: booking with another user's passenger
+- Injection resilience: SQL-like, XSS-like, command-like, traversal-like, and template-like strings as inert inputs
+- Error-message hygiene: no stack traces, filesystem paths, or database details
+
+OWASP API Security categories are mapped as interview-ready coverage, not a claim of full production assurance. SSRF, unsafe third-party API consumption, and external inventory discovery are intentionally out of scope because Phase 7 has no external target.
+
+Run the Phase 7 tests:
+
+```powershell
+python -m pytest -m "security and api" -v
+```
+
+Generate a Phase 7 HTML report:
+
+```powershell
+python -m pytest -m "security and api" -v --html=reports/security-api-report.html --self-contained-html
+```
+
+ZAP baseline scanning is optional and passive/bounded. CI only runs it when the repository variable `RUN_ZAP_BASELINE` is set to `true`; the target remains `http://127.0.0.1:8001`.
+
+Phase distinction:
+
+- Phase 2: functional deterministic airline API validation and negative business-rule tests
+- Phase 5: opt-in Duffel TEST/SANDBOX integration, skipped without `DUFFEL_ACCESS_TOKEN`
+- Phase 6: k6 performance testing against the local deterministic service
+- Phase 7: API security testing against the local deterministic service in security mode
+
 ## Running Tests
 Collect tests:
 
@@ -282,6 +344,12 @@ Run the Phase 6 k6 smoke test:
 k6 run performance/k6/scenarios/smoke.js
 ```
 
+Run Phase 7 API security tests:
+
+```powershell
+python -m pytest -m "security and api" -v
+```
+
 Run all currently available tests:
 
 ```powershell
@@ -306,7 +374,7 @@ Future-phase tests are collected but skipped until their implementations exist.
 - `llm`: semantic LLM quality tests
 - `rag`: RAG evaluation tests
 - `agents`: agent/tool-call tests
-- `security`: defensive AI security tests
+- `security`: defensive API and AI security tests
 
 ## Architecture
 Phase 1 establishes this client pattern:
@@ -404,6 +472,16 @@ k6
       -> k6 thresholds and business metrics
 ```
 
+Phase 7 reuses the same deterministic HTTP service with explicit security mode:
+
+```text
+pytest security suite
+  -> local deterministic airline HTTP service --security-mode
+      -> deterministic airline backend
+      -> synthetic identity model
+      -> reusable security assertions
+```
+
 CI runs API and UI automation separately:
 
 - `.github/workflows/phase-1-api-tests.yml`: Phase 1 and Phase 2 deterministic API suites, excluding `real_api`
@@ -411,6 +489,7 @@ CI runs API and UI automation separately:
 - `.github/workflows/phase-4-e2e-tests.yml`: Phase 4 deterministic API + UI E2E suite
 - `.github/workflows/phase-5-real-api-tests.yml`: Phase 5 Duffel TEST/SANDBOX API suite, requiring the `DUFFEL_ACCESS_TOKEN` GitHub secret
 - `.github/workflows/phase-6-performance-tests.yml`: Phase 6 k6 smoke performance suite against the local deterministic service
+- `.github/workflows/phase-7-security-tests.yml`: Phase 7 deterministic API security suite against the local service in security mode, plus optional ZAP baseline when explicitly enabled
 
 ## Roadmap
 1. Base API client, fixtures, deterministic API gates
@@ -419,11 +498,12 @@ CI runs API and UI automation separately:
 4. Airline API + UI E2E orchestration
 5. Real airline API integration through Duffel TEST/SANDBOX
 6. k6 performance testing
-7. Mobile/Appium testing
-8. LLM semantic evaluation
-9. RAG retrieval and groundedness
-10. Agent/tool validation
-11. Kafka and event-driven tests
-12. Database and contract testing
-13. Security and observability testing
-14. Docker, Kubernetes, Jenkins, observability, and quality gates
+7. Security testing and API security
+8. Mobile/Appium testing
+9. LLM semantic evaluation
+10. RAG retrieval and groundedness
+11. Agent/tool validation
+12. Kafka and event-driven tests
+13. Database and contract testing
+14. Observability testing
+15. Docker, Kubernetes, Jenkins, observability, and quality gates
