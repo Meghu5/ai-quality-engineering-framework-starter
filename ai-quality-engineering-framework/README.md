@@ -43,6 +43,13 @@ Phase 5 adds real airline API integration through Duffel TEST/SANDBOX mode:
 - Mapping from Duffel responses into existing airline-domain models
 - Opt-in real API tests guarded by `DUFFEL_ACCESS_TOKEN`
 
+Phase 6 adds k6 performance testing:
+
+- Local deterministic airline HTTP test double for k6 execution
+- k6 smoke, load, stress, spike, and soak profiles
+- Reusable k6 client, data, assertions, thresholds, and business metrics
+- CI smoke performance gate that does not require Duffel credentials
+
 Future suites for LLM, RAG, agents, and AI security are intentionally skipped until their phases are implemented.
 
 ## Prerequisites
@@ -137,6 +144,53 @@ Known real API limitations:
 - Tests validate structure and business invariants, not unstable live prices
 - Real API tests require a Duffel test token that starts with `duffel_test_`
 
+## Phase 6 k6 Performance Testing
+Phase 6 introduces a separate k6 performance layer for airline API flows.
+
+The default performance target is a local deterministic HTTP service:
+
+```powershell
+python -m performance.apps.deterministic_airline_service --host 127.0.0.1 --port 8001
+```
+
+This service reuses the deterministic airline API behavior and data. It is not a production airline backend and does not call Duffel.
+
+Install k6 and verify it:
+
+```powershell
+k6 version
+```
+
+See detailed install/run instructions:
+
+```text
+performance/k6/README.md
+```
+
+Run the k6 smoke scenario:
+
+```powershell
+k6 run performance/k6/scenarios/smoke.js
+```
+
+Run a specific profile:
+
+```powershell
+k6 run -e K6_PROFILE=load performance/k6/scenarios/flight_search.js
+k6 run -e K6_PROFILE=stress performance/k6/scenarios/booking.js
+k6 run -e K6_PROFILE=spike performance/k6/scenarios/availability.js
+k6 run -e K6_PROFILE=soak -e K6_SOAK_DURATION=30m performance/k6/scenarios/fare.js
+```
+
+The performance layer measures HTTP timing plus business success metrics:
+
+- `flight_search_success`
+- `availability_success`
+- `fare_success`
+- `booking_success`
+
+Thresholds include error rate, checks, and p90/p95/p99 latency. They are engineering demonstration thresholds for the deterministic local service, not production SLAs.
+
 ## Running Tests
 Collect tests:
 
@@ -214,6 +268,18 @@ Generate a Phase 5 Duffel TEST/SANDBOX API HTML report:
 
 ```powershell
 python -m pytest -m real_api -v --html=reports/duffel-real-api-report.html --self-contained-html
+```
+
+Run the Phase 6 local deterministic performance service:
+
+```powershell
+python -m performance.apps.deterministic_airline_service --host 127.0.0.1 --port 8001
+```
+
+Run the Phase 6 k6 smoke test:
+
+```powershell
+k6 run performance/k6/scenarios/smoke.js
 ```
 
 Run all currently available tests:
@@ -328,12 +394,23 @@ ApiClient
       -> business assertions
 ```
 
+Phase 6 keeps performance testing separate from pytest and real API integration:
+
+```text
+k6
+  -> local deterministic airline HTTP service
+      -> deterministic airline backend
+      -> Phase 2 airline contract
+      -> k6 thresholds and business metrics
+```
+
 CI runs API and UI automation separately:
 
 - `.github/workflows/phase-1-api-tests.yml`: Phase 1 and Phase 2 deterministic API suites, excluding `real_api`
 - `.github/workflows/phase-3-ui-tests.yml`: Phase 3 deterministic Playwright UI suite
 - `.github/workflows/phase-4-e2e-tests.yml`: Phase 4 deterministic API + UI E2E suite
 - `.github/workflows/phase-5-real-api-tests.yml`: Phase 5 Duffel TEST/SANDBOX API suite, requiring the `DUFFEL_ACCESS_TOKEN` GitHub secret
+- `.github/workflows/phase-6-performance-tests.yml`: Phase 6 k6 smoke performance suite against the local deterministic service
 
 ## Roadmap
 1. Base API client, fixtures, deterministic API gates
@@ -341,11 +418,12 @@ CI runs API and UI automation separately:
 3. Playwright airline UI flow
 4. Airline API + UI E2E orchestration
 5. Real airline API integration through Duffel TEST/SANDBOX
-6. Mobile/Appium testing
-7. LLM semantic evaluation
-8. RAG retrieval and groundedness
-9. Agent/tool validation
-10. Kafka and event-driven tests
-11. Database and contract testing
-12. Security and performance testing
-13. Docker, Kubernetes, Jenkins, observability, and quality gates
+6. k6 performance testing
+7. Mobile/Appium testing
+8. LLM semantic evaluation
+9. RAG retrieval and groundedness
+10. Agent/tool validation
+11. Kafka and event-driven tests
+12. Database and contract testing
+13. Security and observability testing
+14. Docker, Kubernetes, Jenkins, observability, and quality gates

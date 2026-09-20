@@ -1,0 +1,47 @@
+name: Phase 6 Performance Tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+
+jobs:
+  k6-smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-quality-engineering-framework
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Set up k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Start deterministic airline performance service
+        run: |
+          python -m performance.apps.deterministic_airline_service --host 127.0.0.1 --port 8001 &
+          sleep 2
+
+      - name: Run k6 smoke performance test
+        run: |
+          mkdir -p reports
+          k6 run --summary-export=reports/k6-smoke-summary.json performance/k6/scenarios/smoke.js
+
+      - name: Upload k6 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-smoke-report
+          path: ai-quality-engineering-framework/reports/k6-smoke-summary.json
