@@ -1,0 +1,49 @@
+name: Phase 9 RAG Quality Tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+
+jobs:
+  rag-quality:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-quality-engineering-framework
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run deterministic RAG retrieval tests
+        run: |
+          python -m pytest -m "rag_retrieval" -v
+
+      - name: Run deterministic RAG quality tests
+        run: |
+          mkdir -p reports/rag
+          python -m pytest -m "rag_quality" -v --html=reports/rag/rag-quality-report.html --self-contained-html
+
+      - name: Run deterministic RAG security tests
+        run: |
+          python -m pytest -m "rag_security" -v
+
+      - name: Upload RAG quality reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-9-rag-quality-reports
+          path: |
+            ai-quality-engineering-framework/reports/rag/rag-quality-report.html
+            ai-quality-engineering-framework/reports/rag/rag_quality_report.json

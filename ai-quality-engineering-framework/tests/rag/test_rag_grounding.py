@@ -1,16 +1,19 @@
+from __future__ import annotations
+
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Future phase: RAG testing is not implemented yet.")
+from rag_quality.evaluators import RagEvaluator
 
 
-@pytest.mark.rag
-def test_answer_is_grounded(rag_client, evaluator):
-    result = rag_client.ask("What is our refund policy?")
-    assert result.retrieved_chunks
+pytestmark = [pytest.mark.rag, pytest.mark.rag_quality]
 
-    score = evaluator.groundedness(
-        question="What is our refund policy?",
-        answer=result.answer,
-        context=result.retrieved_chunks,
-    )
-    assert score >= 8, f"Groundedness too low: {score}/10"
+
+def test_answer_is_grounded_for_refund_policy(rag_pipeline, rag_cases):
+    case = next(case for case in rag_cases if case.case_id == "rag-006")
+    answer = rag_pipeline.answer_case(case)
+
+    evaluation = RagEvaluator().evaluate(case, answer)
+
+    assert evaluation.groundedness.passed
+    assert evaluation.citations.passed
+    assert evaluation.overall_passed

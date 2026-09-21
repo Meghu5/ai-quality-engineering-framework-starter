@@ -67,7 +67,16 @@ Phase 8 adds deterministic AI/LLM quality engineering:
 - Reusable evaluators for intent, entities, relevance, groundedness, safety, PII, prompt injection, hallucination, structured output, and tool/action validation
 - AI quality thresholds and JSON/HTML reporting
 
-Future suites for RAG and agents are intentionally skipped until their phases are implemented.
+Phase 9 adds deterministic RAG quality engineering:
+
+- Airline policy knowledge base with document metadata and versioning
+- Deterministic document loading, validation, and chunking
+- Local lexical retrieval abstraction with deterministic sparse embeddings
+- Hit@K, Recall@K, Precision@K, MRR, context relevance, and context completeness gates
+- Grounded answer, citation, hallucination, prompt-injection, and PII-protection evaluators
+- RAG quality report and CI workflow without external vector databases or paid APIs
+
+Future agent suites are intentionally skipped until their phase is implemented.
 
 ## Prerequisites
 - Python 3.14
@@ -350,6 +359,60 @@ reports/ai-quality-report.json
 
 Optional real LLM integration is represented by a provider interface and disabled adapter seam. It is not wired into the default suite and must be marked separately with `real_llm` when implemented. Phase 8 does not implement full RAG, vector search, LangChain, LangGraph, MCP, autonomous agents, or production LLM evaluation; those remain future phases.
 
+## Phase 9 RAG Quality Engineering
+Phase 9 introduces deterministic Retrieval-Augmented Generation quality testing for airline policy answers. RAG quality matters because a system can have a valid prompt and still fail if ingestion, chunking, retrieval, ranking, context assembly, citations, or grounded generation are weak.
+
+The default Phase 9 stack is local and deterministic:
+
+```text
+data/rag/documents.json
+  -> DocumentLoader
+  -> DeterministicChunker
+  -> DeterministicSparseEmbeddingProvider
+  -> LexicalRetriever
+  -> RagContextBuilder
+  -> DeterministicRagPipeline
+  -> RagEvaluator
+  -> RagQualityReport
+```
+
+It does not require OpenAI, Anthropic, Gemini, FAISS, Chroma, pgvector, Elasticsearch/OpenSearch, Azure AI Search, Pinecone, or any external vector database.
+
+Phase 9 validates:
+
+- ingestion and document metadata
+- malformed and duplicate documents
+- chunk size, overlap, ordering, and metadata propagation
+- deterministic retrieval and ranking
+- Hit@1, Hit@3, Hit@5, Recall@K, Precision@K, and MRR
+- context relevance and completeness
+- groundedness against retrieved context
+- citation existence, validity, and context alignment
+- hallucination traps and contradictory claims
+- prompt injection inside retrieved documents
+- synthetic PII protection
+- empty, malformed, unrelated, short, and long query failure modes
+- stale versus current document version behavior
+
+The deterministic knowledge base contains airline policy documents for baggage, check-in, seats, cancellations, refunds, fares, name correction, passenger types, special assistance, minors, sports equipment, dangerous goods, disruptions, travel documentation, loyalty, transfers, security test data, and privacy test data.
+
+Run Phase 9 RAG tests:
+
+```powershell
+python -m pytest -m "rag" -v
+python -m pytest -m "rag_retrieval" -v
+python -m pytest -m "rag_quality" -v
+python -m pytest -m "rag_security" -v
+```
+
+The RAG quality gate writes:
+
+```text
+reports/rag/rag_quality_report.json
+```
+
+Production RAG systems may later plug in real embedding providers or vector stores such as FAISS, Chroma, pgvector, Elasticsearch/OpenSearch, Azure AI Search, or Pinecone. Phase 9 deliberately keeps the default test suite dependency-light and deterministic so it can run locally and in CI.
+
 ## Running Tests
 Collect tests:
 
@@ -453,6 +516,12 @@ Run Phase 8 AI quality tests:
 python -m pytest -m "ai" -v
 ```
 
+Run Phase 9 RAG quality tests:
+
+```powershell
+python -m pytest -m "rag" -v
+```
+
 Run all currently available tests:
 
 ```powershell
@@ -478,6 +547,9 @@ Future-phase tests are collected but skipped until their implementations exist.
 - `ai`: deterministic AI quality tests
 - `real_llm`: optional real LLM provider tests
 - `rag`: RAG evaluation tests
+- `rag_retrieval`: RAG retrieval and ranking tests
+- `rag_quality`: RAG answer quality and groundedness tests
+- `rag_security`: RAG prompt-injection and PII tests
 - `agents`: agent/tool-call tests
 - `security`: defensive API and AI security tests
 
@@ -515,7 +587,7 @@ Current limitations:
 - No payment, ticketing, seats, baggage, check-in, refunds, or loyalty APIs yet
 - UI automation uses a local deterministic demo app, not a production airline site
 - No mobile/Appium integration yet
-- No LLM/RAG/agent implementation yet
+- No autonomous agent implementation yet; AI and RAG coverage is deterministic
 
 Phase 3 UI structure:
 
@@ -599,6 +671,20 @@ tests/ai
       -> AI quality report
 ```
 
+Phase 9 adds deterministic RAG quality gates:
+
+```text
+tests/rag
+  -> airline policy documents
+      -> loader and metadata validation
+      -> chunker
+      -> local sparse retrieval
+      -> context builder
+      -> RAG answer and citations
+      -> RAG evaluators and thresholds
+      -> RAG quality report
+```
+
 CI runs API and UI automation separately:
 
 - `.github/workflows/phase-1-api-tests.yml`: Phase 1 and Phase 2 deterministic API suites, excluding `real_api`
@@ -608,6 +694,7 @@ CI runs API and UI automation separately:
 - `.github/workflows/phase-6-performance-tests.yml`: Phase 6 k6 smoke performance suite against the local deterministic service
 - `.github/workflows/phase-7-security-tests.yml`: Phase 7 deterministic API security suite against the local service in security mode, plus optional ZAP baseline when explicitly enabled
 - `.github/workflows/phase-8-ai-quality-tests.yml`: Phase 8 deterministic AI quality suite with HTML and JSON report artifacts
+- `.github/workflows/phase-9-rag-quality-tests.yml`: Phase 9 deterministic RAG retrieval, quality, and security gates with report artifacts
 
 ## Roadmap
 1. Base API client, fixtures, deterministic API gates
