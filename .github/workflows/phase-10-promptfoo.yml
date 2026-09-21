@@ -1,0 +1,49 @@
+name: Phase 10 Promptfoo Evaluation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  promptfoo:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-quality-engineering-framework
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Python baseline dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Install Promptfoo
+        working-directory: ai-quality-engineering-framework/promptfoo
+        run: npm install
+
+      - name: Generate Promptfoo tests from golden dataset
+        run: python promptfoo/build_promptfoo_config.py
+
+      - name: Run Promptfoo
+        env:
+          AI_EVAL_PROMPTFOO_ENABLED: "true"
+        run: npx --prefix promptfoo promptfoo eval -c promptfoo/promptfooconfig.yaml --output reports/ai_eval/promptfoo-results.json
+
+      - name: Upload Promptfoo report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-10-promptfoo-report
+          path: ai-quality-engineering-framework/reports/ai_eval/promptfoo-results.json

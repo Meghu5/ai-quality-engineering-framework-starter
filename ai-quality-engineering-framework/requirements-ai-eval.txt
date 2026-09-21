@@ -1,0 +1,5 @@
+# Optional Phase 10 judge-based evaluation dependencies.
+# Keep these outside requirements.txt so the deterministic baseline remains local.
+# Verify current package support before enabling in Python 3.14 CI environments.
+ragas>=0.4,<0.5
+deepeval>=3.2,<4

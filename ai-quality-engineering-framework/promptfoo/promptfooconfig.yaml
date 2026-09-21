@@ -1,0 +1,12 @@
+description: Phase 10 deterministic airline AI regression suite
+
+prompts:
+  - "{{user_input}}"
+
+providers:
+  - id: exec:python deterministic_provider.py
+    label: deterministic-local-airline-provider
+
+tests: generated/airline_regression.yaml
+
+outputPath: ../reports/ai_eval/promptfoo-results.json

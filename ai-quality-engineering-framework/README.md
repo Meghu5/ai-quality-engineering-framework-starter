@@ -76,6 +76,13 @@ Phase 9 adds deterministic RAG quality engineering:
 - Grounded answer, citation, hallucination, prompt-injection, and PII-protection evaluators
 - RAG quality report and CI workflow without external vector databases or paid APIs
 
+Phase 10 adds optional industry-standard evaluation integrations:
+
+- Ragas adapter for RAG faithfulness, answer relevance, context relevance, context precision, and context recall concepts
+- DeepEval adapter for AI/RAG judge-style metrics such as answer relevancy, faithfulness, contextual relevancy, and hallucination
+- Promptfoo configuration for airline prompt regression and adversarial prompt testing
+- Unified Phase 10 report that separates deterministic baseline gates from optional third-party framework status
+
 Future agent suites are intentionally skipped until their phase is implemented.
 
 ## Prerequisites
@@ -413,6 +420,71 @@ reports/rag/rag_quality_report.json
 
 Production RAG systems may later plug in real embedding providers or vector stores such as FAISS, Chroma, pgvector, Elasticsearch/OpenSearch, Azure AI Search, or Pinecone. Phase 9 deliberately keeps the default test suite dependency-light and deterministic so it can run locally and in CI.
 
+## Phase 10 Industry-Standard AI Evaluation
+Phase 10 layers Ragas, DeepEval, and Promptfoo integration points on top of the deterministic Phase 8 and Phase 9 quality gates. The deterministic gates remain the baseline because they are reproducible, credential-free, and suitable for local development and CI.
+
+```text
+Phase 8 deterministic AI quality
+  -> Phase 9 deterministic RAG quality
+      -> Phase 10 optional evaluation integrations
+          -> Ragas
+          -> DeepEval
+          -> Promptfoo
+      -> Unified evaluation report
+      -> Quality gate
+```
+
+Phase 10 uses:
+
+- `ai_eval/`: normalized evaluation result models, optional framework adapters, report generation, and quality gate logic
+- `promptfoo/`: Promptfoo config, deterministic local provider, and a generator that derives Promptfoo tests from `data/ai/golden_cases.json`
+- `requirements-ai-eval.txt`: optional Python dependencies for Ragas and DeepEval
+
+The default behavior does not require OpenAI, Anthropic, Gemini, Azure OpenAI, local model weights, an external vector database, or any paid service. If Ragas or DeepEval are not installed, the unified report records `unavailable`. If they are installed but no judge provider is configured, the report records `provider_required`. These states are not represented as fake zero scores or fake passes.
+
+Configuration:
+
+```powershell
+AI_EVAL_PROVIDER=none
+AI_EVAL_RAGAS_ENABLED=false
+AI_EVAL_DEEPEVAL_ENABLED=false
+AI_EVAL_PROMPTFOO_ENABLED=false
+AI_EVAL_FAIL_ON_OPTIONAL_UNAVAILABLE=false
+```
+
+Run Phase 10 adapter and report tests:
+
+```powershell
+python -m pytest tests/ai_eval -v
+```
+
+Generate the unified report:
+
+```powershell
+python -c "from ai_eval.report import write_phase10_report; write_phase10_report()"
+```
+
+The report is written to:
+
+```text
+reports/ai_eval/phase10_report.json
+```
+
+Ragas and DeepEval can be connected later to OpenAI, Anthropic, Gemini, Azure OpenAI, Ollama, vLLM, local Hugging Face models, or OpenAI-compatible local endpoints through the provider abstraction. Judge-based frameworks may disagree because they use different judge models, scoring rubrics, thresholds, and metric definitions; Phase 10 keeps results normalized while documenting that they are not mathematically identical.
+
+Promptfoo is optional and Node-based. The baseline Python CI does not depend on Node.js. To prepare Promptfoo tests from the existing golden dataset:
+
+```powershell
+python promptfoo/build_promptfoo_config.py
+```
+
+Then run Promptfoo only in an environment where Node and Promptfoo are installed:
+
+```powershell
+npm --prefix promptfoo install
+npx --prefix promptfoo promptfoo eval -c promptfoo/promptfooconfig.yaml --output reports/ai_eval/promptfoo-results.json
+```
+
 ## Running Tests
 Collect tests:
 
@@ -522,6 +594,12 @@ Run Phase 9 RAG quality tests:
 python -m pytest -m "rag" -v
 ```
 
+Run Phase 10 AI evaluation adapter/configuration tests:
+
+```powershell
+python -m pytest tests/ai_eval -v
+```
+
 Run all currently available tests:
 
 ```powershell
@@ -550,6 +628,7 @@ Future-phase tests are collected but skipped until their implementations exist.
 - `rag_retrieval`: RAG retrieval and ranking tests
 - `rag_quality`: RAG answer quality and groundedness tests
 - `rag_security`: RAG prompt-injection and PII tests
+- `ai_eval`: optional third-party AI evaluation adapter/configuration tests
 - `agents`: agent/tool-call tests
 - `security`: defensive API and AI security tests
 
@@ -695,6 +774,8 @@ CI runs API and UI automation separately:
 - `.github/workflows/phase-7-security-tests.yml`: Phase 7 deterministic API security suite against the local service in security mode, plus optional ZAP baseline when explicitly enabled
 - `.github/workflows/phase-8-ai-quality-tests.yml`: Phase 8 deterministic AI quality suite with HTML and JSON report artifacts
 - `.github/workflows/phase-9-rag-quality-tests.yml`: Phase 9 deterministic RAG retrieval, quality, and security gates with report artifacts
+- `.github/workflows/phase-10-ai-evaluation.yml`: Phase 10 deterministic baseline plus optional framework adapter/report tests
+- `.github/workflows/phase-10-promptfoo.yml`: optional Node/Promptfoo prompt regression workflow
 
 ## Roadmap
 1. Base API client, fixtures, deterministic API gates

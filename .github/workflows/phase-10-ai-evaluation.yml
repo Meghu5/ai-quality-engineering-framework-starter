@@ -1,0 +1,74 @@
+name: Phase 10 AI Evaluation
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+
+jobs:
+  deterministic-ai-evaluation:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-quality-engineering-framework
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run Phase 8 deterministic AI tests
+        run: python -m pytest tests/ai -v
+
+      - name: Run Phase 9 deterministic RAG tests
+        run: python -m pytest -m "rag" -v
+
+      - name: Run Phase 10 adapter and report tests
+        run: python -m pytest tests/ai_eval -v
+      - name: Generate Phase 10 unified report
+        run: |
+          python -c "from ai_eval.report import write_phase10_report; write_phase10_report()"
+
+      - name: Upload Phase 10 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-10-ai-evaluation-report
+          path: ai-quality-engineering-framework/reports/ai_eval/phase10_report.json
+
+  optional-python-judge-adapters:
+    if: ${{ vars.AI_EVAL_OPTIONAL_PYTHON == 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-quality-engineering-framework
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install optional AI evaluation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-ai-eval.txt
+
+      - name: Run optional adapter tests
+        env:
+          AI_EVAL_RAGAS_ENABLED: "true"
+          AI_EVAL_DEEPEVAL_ENABLED: "true"
+          AI_EVAL_PROVIDER: ${{ vars.AI_EVAL_PROVIDER || 'none' }}
+        run: python -m pytest tests/ai_eval -v

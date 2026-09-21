@@ -1,0 +1,14 @@
+{
+  "name": "ai-quality-framework-promptfoo",
+  "private": true,
+  "engines": {
+    "node": ">=22.22.0"
+  },
+  "devDependencies": {
+    "promptfoo": "^0.123.1"
+  },
+  "scripts": {
+    "build": "python build_promptfoo_config.py",
+    "eval": "promptfoo eval -c promptfooconfig.yaml --output ../reports/ai_eval/promptfoo-results.json"
+  }
+}
