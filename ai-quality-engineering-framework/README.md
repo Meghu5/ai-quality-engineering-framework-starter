@@ -777,6 +777,36 @@ CI runs API and UI automation separately:
 - `.github/workflows/phase-10-ai-evaluation.yml`: Phase 10 deterministic baseline plus optional framework adapter/report tests
 - `.github/workflows/phase-10-promptfoo.yml`: optional Node/Promptfoo prompt regression workflow
 
+## Phase 11: Production AI Observability and Traceability
+
+Phase 11 begins with a framework-owned, disabled-by-default observability layer:
+
+```text
+Application
+  -> Observability facade
+  -> Context + span evidence
+  -> In-memory / JSON exporters
+  -> Optional OpenTelemetry backend (future)
+```
+
+The `observability/` package provides context-local trace, span, and correlation IDs,
+strict trace evidence models, a canonical failure taxonomy, safe exporters, and
+centralized attribute redaction. It performs no network activity when disabled and
+does not require OpenTelemetry. Raw prompts, retrieved context, model responses,
+credentials, and PII are excluded by default; only allowlisted operational metadata
+is retained.
+
+Trace evidence remains separate from the strict Phase 10 evaluation contracts so
+existing result schemas and consumers remain compatible. Future HTTP, LLM, and RAG
+instrumentation can depend on the facade without coupling application code to an
+observability vendor.
+
+Run the foundation tests with:
+
+```bash
+python -m pytest tests/observability -v
+```
+
 ## Roadmap
 1. Base API client, fixtures, deterministic API gates
 2. Airline API clients, domain models, and business-rule validations
