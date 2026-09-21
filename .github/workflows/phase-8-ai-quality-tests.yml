@@ -1,0 +1,41 @@
+name: Phase 8 AI Quality Tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+
+jobs:
+  ai-quality:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-quality-engineering-framework
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run deterministic AI quality gate
+        run: |
+          mkdir -p reports
+          python -m pytest -m "ai" -v --html=reports/ai-quality-report.html --self-contained-html
+
+      - name: Upload AI quality reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-8-ai-quality-reports
+          path: |
+            ai-quality-engineering-framework/reports/ai-quality-report.html
+            ai-quality-engineering-framework/reports/ai-quality-report.json

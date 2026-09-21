@@ -58,7 +58,16 @@ Phase 7 adds deterministic API security testing:
 - Security header, HTTP method, data exposure, and abuse-case regression tests
 - Optional OWASP ZAP baseline workflow against the local target only
 
-Future suites for LLM, RAG, and agents are intentionally skipped until their phases are implemented.
+Phase 8 adds deterministic AI/LLM quality engineering:
+
+- Airline chatbot contract with structured intent, entities, actions, grounding, and safety fields
+- Deterministic local LLM provider for CI-safe quality gates
+- Prompt registry with versioned airline assistant prompts
+- 25-case golden dataset for airline AI behavior
+- Reusable evaluators for intent, entities, relevance, groundedness, safety, PII, prompt injection, hallucination, structured output, and tool/action validation
+- AI quality thresholds and JSON/HTML reporting
+
+Future suites for RAG and agents are intentionally skipped until their phases are implemented.
 
 ## Prerequisites
 - Python 3.14
@@ -253,6 +262,94 @@ Phase distinction:
 - Phase 6: k6 performance testing against the local deterministic service
 - Phase 7: API security testing against the local deterministic service in security mode
 
+## Phase 8 AI / LLM Quality Engineering
+Phase 8 introduces an AI quality layer for airline chatbot and assistant behavior. AI quality testing is different from traditional API testing because the test target may produce natural-language and structured outputs that must be checked for intent, relevance, grounding, safety, and data protection rather than only status codes and schemas.
+
+The default provider is deterministic and local:
+
+```text
+DeterministicLLMProvider
+  -> airline chatbot contract
+  -> golden dataset
+  -> deterministic evaluators
+  -> quality thresholds
+```
+
+It does not call OpenAI, Anthropic, Gemini, Duffel, or any external airline system. It is a controlled provider for reproducible tests and CI gates, not a real LLM.
+
+Phase 8 structure:
+
+```text
+ai_quality/
+  providers.py
+  models.py
+  prompt_registry.py
+  dataset.py
+  evaluators.py
+  thresholds.py
+
+ai/prompts/
+  airline_assistant_v1.txt
+  airline_assistant_v2.txt
+
+data/ai/
+  golden_cases.json
+
+tests/ai/
+  test_intent.py
+  test_entities.py
+  test_structured_output.py
+  test_groundedness.py
+  test_relevance.py
+  test_safety.py
+  test_pii.py
+  test_prompt_injection.py
+  test_hallucination.py
+  test_tool_actions.py
+  test_quality_gate.py
+```
+
+The golden dataset contains 25 deterministic cases covering flight search, flight status, booking, cancellation, baggage, check-in, seat selection, fares, refunds, general help, unsupported requests, ambiguity, missing information, invalid airports/dates, multiple entities, multi-turn state, safety-sensitive prompts, prompt injection, synthetic PII, hallucination traps, unsupported policy questions, tool/action requests, and structured output.
+
+Prompt versions are loaded through `PromptRegistry`, so tests can identify which prompt version produced the response. Current prompt versions:
+
+- `airline_assistant_v1`: default deterministic quality gate prompt
+- `airline_assistant_v2`: reserved traceable prompt variant for future comparison
+
+Quality thresholds are centralized in `ai_quality/thresholds.py`:
+
+- intent accuracy >= 0.95
+- entity accuracy >= 0.95
+- structured output validity = 1.00
+- relevance score >= 0.95
+- groundedness score >= 0.95
+- safety pass rate = 1.00
+- PII protection rate = 1.00
+- prompt injection pass rate = 1.00
+- hallucination pass rate >= 0.95
+
+These are project quality gates for deterministic tests, not industry certification.
+
+Run the Phase 8 AI quality tests:
+
+```powershell
+python -m pytest -m "ai" -v
+```
+
+Generate a Phase 8 HTML report:
+
+```powershell
+python -m pytest -m "ai" -v --html=reports/ai-quality-report.html --self-contained-html
+```
+
+The quality gate also writes:
+
+```text
+reports/ai-quality-report.json
+```
+
+Optional real LLM integration is represented by a provider interface and disabled adapter seam. It is not wired into the default suite and must be marked separately with `real_llm` when implemented. Phase 8 does not implement full RAG, vector search, LangChain, LangGraph, MCP, autonomous agents, or production LLM evaluation; those remain future phases.
+
 ## Running Tests
 Collect tests:
 
@@ -350,6 +447,12 @@ Run Phase 7 API security tests:
 python -m pytest -m "security and api" -v
 ```
 
+Run Phase 8 AI quality tests:
+
+```powershell
+python -m pytest -m "ai" -v
+```
+
 Run all currently available tests:
 
 ```powershell
@@ -372,6 +475,8 @@ Future-phase tests are collected but skipped until their implementations exist.
 - `e2e`: end-to-end workflow tests
 - `ui`: Playwright UI tests
 - `llm`: semantic LLM quality tests
+- `ai`: deterministic AI quality tests
+- `real_llm`: optional real LLM provider tests
 - `rag`: RAG evaluation tests
 - `agents`: agent/tool-call tests
 - `security`: defensive API and AI security tests
@@ -482,6 +587,18 @@ pytest security suite
       -> reusable security assertions
 ```
 
+Phase 8 adds a deterministic AI quality layer:
+
+```text
+tests/ai
+  -> DeterministicLLMProvider
+      -> airline chatbot response contract
+      -> prompt registry
+      -> golden dataset
+      -> evaluators and thresholds
+      -> AI quality report
+```
+
 CI runs API and UI automation separately:
 
 - `.github/workflows/phase-1-api-tests.yml`: Phase 1 and Phase 2 deterministic API suites, excluding `real_api`
@@ -490,6 +607,7 @@ CI runs API and UI automation separately:
 - `.github/workflows/phase-5-real-api-tests.yml`: Phase 5 Duffel TEST/SANDBOX API suite, requiring the `DUFFEL_ACCESS_TOKEN` GitHub secret
 - `.github/workflows/phase-6-performance-tests.yml`: Phase 6 k6 smoke performance suite against the local deterministic service
 - `.github/workflows/phase-7-security-tests.yml`: Phase 7 deterministic API security suite against the local service in security mode, plus optional ZAP baseline when explicitly enabled
+- `.github/workflows/phase-8-ai-quality-tests.yml`: Phase 8 deterministic AI quality suite with HTML and JSON report artifacts
 
 ## Roadmap
 1. Base API client, fixtures, deterministic API gates
@@ -499,10 +617,10 @@ CI runs API and UI automation separately:
 5. Real airline API integration through Duffel TEST/SANDBOX
 6. k6 performance testing
 7. Security testing and API security
-8. Mobile/Appium testing
-9. LLM semantic evaluation
-10. RAG retrieval and groundedness
-11. Agent/tool validation
+8. AI/LLM quality engineering
+9. RAG retrieval and groundedness
+10. Agent/tool validation
+11. Mobile/Appium testing
 12. Kafka and event-driven tests
 13. Database and contract testing
 14. Observability testing
