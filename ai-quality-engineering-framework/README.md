@@ -831,6 +831,20 @@ summarizes failures, latency, provider/model and operation usage, trace integrit
 lineage completeness, and CI/evaluation coverage. Missing evidence is represented as
 unavailable, reporting remains fail-open, and no live telemetry backend is required.
 
+Generate deterministic readiness diagnostics from the operational analysis and its
+source evidence with:
+
+```bash
+python -m observability.readiness
+```
+
+The command writes `reports/observability/readiness.json` with a separate
+`ready`, `degraded`, `not_ready`, or `unavailable` observability status. Findings use
+explicit severity rules, stable identifiers, safe evidence references, and actionable
+remediation text. Readiness is informational in CI and does not alter the Phase 10 AI
+quality gate. Exporter runtime health is reported as unavailable unless supported by
+future explicit health evidence; no network probe is performed.
+
 Run the foundation tests with:
 
 ```bash

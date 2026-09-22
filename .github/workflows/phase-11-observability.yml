@@ -46,6 +46,10 @@ jobs:
         continue-on-error: true
         run: python -m observability.operational_report
 
+      - name: Generate observability readiness diagnostics
+        continue-on-error: true
+        run: python -m observability.readiness
+
       - name: Run regression suite with telemetry disabled
         env:
           AI_OBSERVABILITY_ENABLED: "false"
