@@ -11,7 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from ai_eval.models import Phase10Report
 from observability.analysis import OperationalAnalysisReport
@@ -22,6 +22,7 @@ from observability.readiness import ObservabilityReadinessReport
 
 logger = logging.getLogger(__name__)
 MANIFEST_SCHEMA_VERSION = "1.0"
+SUPPORTED_MANIFEST_SCHEMA_VERSIONS = frozenset({MANIFEST_SCHEMA_VERSION})
 PRODUCER_VERSION = "phase11-step7"
 DEFAULT_LIFECYCLE_ROOT = Path("reports") / "observability" / "lifecycle"
 DEFAULT_SOURCE_ROOT = Path("reports")
@@ -63,7 +64,7 @@ class ManifestArtifact(BaseModel):
 class EvidenceManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = MANIFEST_SCHEMA_VERSION
+    schema_version: str = Field(min_length=1, strict=True)
     producer: str = "ai-quality-engineering-framework"
     producer_version: str = PRODUCER_VERSION
     run_id: str
@@ -72,6 +73,13 @@ class EvidenceManifest(BaseModel):
     artifacts: list[ManifestArtifact]
     aggregate_byte_count: int = Field(ge=0)
     aggregate_record_count: int = Field(ge=0)
+
+    @field_validator("schema_version")
+    @classmethod
+    def validate_schema_version(cls, value: str) -> str:
+        if value not in SUPPORTED_MANIFEST_SCHEMA_VERSIONS:
+            raise ValueError("unsupported manifest schema version")
+        return value
 
 
 class LifecycleRun(BaseModel):
@@ -234,6 +242,7 @@ def build_manifest(
         for item in sorted(artifacts, key=lambda item: item.relative_path)
     ]
     return EvidenceManifest(
+        schema_version=MANIFEST_SCHEMA_VERSION,
         run_id=run.run_id,
         run_id_source=run.run_id_source,
         artifacts=ordered,
@@ -291,9 +300,23 @@ def _verify_bundle(
         raise ValueError("evidence bundle is incomplete: manifest is absent")
     if manifest_path.stat().st_size > MAX_ARTIFACT_BYTES:
         raise ValueError("manifest exceeds the artifact size limit")
-    manifest = EvidenceManifest.model_validate_json(
-        manifest_path.read_text(encoding="utf-8")
-    )
+    try:
+        payload = _read_bounded_json(manifest_path)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError("manifest is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("manifest must contain a JSON object")
+    if "schema_version" not in payload:
+        raise ValueError("manifest schema version is missing")
+    version = payload["schema_version"]
+    if not isinstance(version, str) or not version:
+        raise ValueError("manifest schema version is malformed")
+    if version not in SUPPORTED_MANIFEST_SCHEMA_VERSIONS:
+        raise ValueError("unsupported manifest schema version")
+    try:
+        manifest = EvidenceManifest.model_validate(payload)
+    except ValidationError as exc:
+        raise ValueError("manifest schema validation failed") from exc
     if not _RUN_ID.fullmatch(manifest.run_id):
         raise ValueError("manifest run identity is invalid")
     if require_matching_directory and bundle_path.name != manifest.run_id:

@@ -15,6 +15,7 @@ from observability.analysis import analyze_operational_evidence
 from observability.ci import CiCorrelationReport, CiTestEvidence
 from observability.lifecycle import (
     ArtifactType,
+    MANIFEST_SCHEMA_VERSION,
     RunIdSource,
     begin_run,
     build_manifest,
@@ -226,6 +227,68 @@ def test_realistic_evidence_bundle_includes_and_verifies_every_step7_artifact(tm
     )
     assert manifest.aggregate_record_count >= len(ArtifactType)
     assert all(item.required for item in manifest.artifacts)
+
+
+def test_supported_manifest_schema_version_is_accepted(tmp_path):
+    final_path = _create_trace_bundle(tmp_path)
+
+    manifest = verify_bundle(final_path)
+
+    assert manifest.schema_version == MANIFEST_SCHEMA_VERSION
+
+
+def test_unsupported_manifest_schema_version_is_rejected(tmp_path):
+    final_path = _create_trace_bundle(tmp_path)
+    manifest_path = final_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = "9.9"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="^unsupported manifest schema version$"):
+        verify_bundle(final_path)
+
+
+@pytest.mark.parametrize(
+    ("version", "message"),
+    [
+        (None, "manifest schema version is missing"),
+        ("", "manifest schema version is malformed"),
+        (123, "manifest schema version is malformed"),
+    ],
+)
+def test_missing_empty_or_malformed_manifest_schema_version_is_rejected(
+    tmp_path, version, message
+):
+    final_path = _create_trace_bundle(tmp_path)
+    manifest_path = final_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if version is None:
+        manifest.pop("schema_version")
+    else:
+        manifest["schema_version"] = version
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=f"^{message}$"):
+        verify_bundle(final_path)
+
+
+def test_manifest_schema_verification_is_deterministic(tmp_path):
+    final_path = _create_trace_bundle(tmp_path)
+    manifest_path = final_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = "unsupported"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    messages = []
+    for _ in range(2):
+        with pytest.raises(ValueError) as error:
+            verify_bundle(final_path)
+        messages.append(str(error.value))
+
+    assert messages == [
+        "unsupported manifest schema version",
+        "unsupported manifest schema version",
+    ]
 
 
 def test_run_ids_are_stable_sanitized_and_do_not_expose_source_values(tmp_path):

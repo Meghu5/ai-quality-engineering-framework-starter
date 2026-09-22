@@ -31,6 +31,11 @@ jobs:
           AI_OBSERVABILITY_ENABLED: "false"
         run: python -m pytest tests/observability -v
 
+      - name: Run regression suite with telemetry disabled
+        env:
+          AI_OBSERVABILITY_ENABLED: "false"
+        run: python -m pytest -v
+
       - name: Generate Phase 10 evidence
         env:
           AI_OBSERVABILITY_ENABLED: "false"
@@ -50,17 +55,16 @@ jobs:
         continue-on-error: true
         run: python -m observability.readiness
 
-      - name: Run regression suite with telemetry disabled
-        env:
-          AI_OBSERVABILITY_ENABLED: "false"
-        run: python -m pytest -v
+      - name: Finalize and verify Phase 11 lifecycle bundle
+        run: >-
+          python -c "from observability.lifecycle import ArtifactType,
+          create_bundle_from_existing_reports, verify_bundle;
+          bundle = create_bundle_from_existing_reports(required_types=tuple(ArtifactType));
+          verify_bundle(bundle)"
 
-      - name: Upload Phase 11 evidence
-        if: always()
+      - name: Upload finalized Phase 11 lifecycle bundle
         uses: actions/upload-artifact@v4
         with:
           name: phase-11-observability-evidence
-          path: |
-            ai-quality-engineering-framework/reports/observability/
-            ai-quality-engineering-framework/reports/ai_eval/
-            ai-quality-engineering-framework/reports/ci/
+          path: ai-quality-engineering-framework/reports/observability/lifecycle/runs/
+          if-no-files-found: error
