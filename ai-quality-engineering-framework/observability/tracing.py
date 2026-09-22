@@ -8,7 +8,7 @@ from typing import Any
 
 from observability.config import DEFAULT_OBSERVABILITY_SETTINGS, ObservabilitySettings
 from observability.context import generate_span_id, get_context, use_context
-from observability.exporters import JsonEvidenceExporter, SpanExporter
+from observability.exporters import InMemoryExporter, JsonEvidenceExporter, SpanExporter
 from observability.models import FailureCategory, SpanEvidence, TraceStatus
 from observability.redaction import sanitize_attributes
 
@@ -201,6 +201,16 @@ def create_tracing_facade(
 ) -> TracingFacade:
     resolved = settings or ObservabilitySettings.from_env()
     exporter: SpanExporter | None = None
-    if resolved.enabled and resolved.exporter == "json":
-        exporter = JsonEvidenceExporter()
+    if resolved.enabled:
+        if resolved.exporter == "memory":
+            exporter = InMemoryExporter()
+        elif resolved.exporter == "json":
+            exporter = JsonEvidenceExporter()
+        elif resolved.exporter == "otlp":
+            try:
+                from observability.otel import OtlpSpanExporterAdapter
+
+                exporter = OtlpSpanExporterAdapter(resolved)
+            except Exception:
+                logger.exception("Unable to initialize OTLP observability exporter")
     return TracingFacade(settings=resolved, exporter=exporter)

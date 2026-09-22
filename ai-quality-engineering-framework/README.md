@@ -785,8 +785,7 @@ Phase 11 begins with a framework-owned, disabled-by-default observability layer:
 Application
   -> Observability facade
   -> Context + span evidence
-  -> In-memory / JSON exporters
-  -> Optional OpenTelemetry backend (future)
+  -> In-memory / JSON / optional OTLP HTTP exporters
 ```
 
 The `observability/` package provides context-local trace, span, and correlation IDs,
@@ -800,6 +799,24 @@ Trace evidence remains separate from the strict Phase 10 evaluation contracts so
 existing result schemas and consumers remain compatible. Future HTTP, LLM, and RAG
 instrumentation can depend on the facade without coupling application code to an
 observability vendor.
+
+Observability remains disabled by default. The in-memory and JSON exporters require
+only the standard project dependencies. To enable optional OTLP HTTP export, install
+`requirements-observability.txt` and configure:
+
+```bash
+AI_OBSERVABILITY_ENABLED=true
+AI_OBSERVABILITY_EXPORTER=otlp
+AI_OBSERVABILITY_OTLP_ENDPOINT=http://localhost:4318/v1/traces
+AI_OBSERVABILITY_OTLP_TIMEOUT_SECONDS=5
+```
+
+OTLP telemetry preserves framework trace and span IDs and exports only allowlisted,
+redacted operational metadata. Raw prompts, RAG context, model responses, request or
+response bodies, credentials, and PII are not exported. Export initialization,
+transmission, flush, and shutdown failures are fail-open and cannot replace
+application results or exceptions. Tests use in-memory fakes and require no external
+OTLP backend.
 
 Run the foundation tests with:
 
