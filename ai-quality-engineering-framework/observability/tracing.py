@@ -7,7 +7,7 @@ from types import TracebackType
 from typing import Any
 
 from observability.config import DEFAULT_OBSERVABILITY_SETTINGS, ObservabilitySettings
-from observability.context import generate_span_id, get_context, use_context
+from observability.context import generate_span_id, generate_trace_id, get_context, use_context
 from observability.exporters import InMemoryExporter, JsonEvidenceExporter, SpanExporter
 from observability.models import FailureCategory, SpanEvidence, TraceStatus
 from observability.redaction import sanitize_attributes
@@ -45,13 +45,21 @@ class Span:
         if not self._facade.enabled:
             return self
         try:
-            parent = None if self.new_trace else get_context()
+            from observability.ci import get_current_test_correlation_id
+
+            existing_context = get_context()
+            parent = None if self.new_trace else existing_context
             self._parent_span_id = parent.span_id if parent else None
             self._scope = use_context(
-                trace_id=None if self.new_trace else (parent.trace_id if parent else None),
+                trace_id=(
+                    generate_trace_id()
+                    if self.new_trace
+                    else (parent.trace_id if parent else None)
+                ),
                 span_id=generate_span_id(),
                 correlation_id=self.correlation_id
-                or (parent.correlation_id if parent else None),
+                or (existing_context.correlation_id if existing_context else None)
+                or get_current_test_correlation_id(),
             )
             self._scope.__enter__()
             self._started_at = datetime.now(timezone.utc)
@@ -189,6 +197,12 @@ class TracingFacade:
         return context.trace_id if self.enabled and context else None
 
     def _export(self, evidence: SpanEvidence) -> None:
+        try:
+            from observability.ci import record_span_for_current_test
+
+            record_span_for_current_test(evidence)
+        except Exception:
+            logger.exception("Unable to correlate observability span with pytest evidence")
         try:
             if self.exporter is not None:
                 self.exporter.export(evidence)

@@ -31,7 +31,28 @@ jobs:
           AI_OBSERVABILITY_ENABLED: "false"
         run: python -m pytest tests/observability -v
 
+      - name: Generate Phase 10 evidence
+        env:
+          AI_OBSERVABILITY_ENABLED: "false"
+        run: python -c "from ai_eval.report import write_phase10_report; write_phase10_report()"
+
+      - name: Run CI correlation evidence
+        env:
+          AI_OBSERVABILITY_ENABLED: "true"
+          AI_OBSERVABILITY_EXPORTER: "json"
+        run: python -m pytest -p observability.pytest_plugin tests/observability tests/ai_eval -q
+
       - name: Run regression suite with telemetry disabled
         env:
           AI_OBSERVABILITY_ENABLED: "false"
         run: python -m pytest -v
+
+      - name: Upload Phase 11 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-11-observability-evidence
+          path: |
+            ai-quality-engineering-framework/reports/observability/
+            ai-quality-engineering-framework/reports/ai_eval/
+            ai-quality-engineering-framework/reports/ci/
