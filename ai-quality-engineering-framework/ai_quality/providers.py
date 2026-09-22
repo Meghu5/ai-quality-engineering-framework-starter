@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import os
 import re
+import json
+import time
 from abc import ABC, abstractmethod
 from typing import Any
+
+import httpx
+from pydantic import ValidationError
 
 from ai_quality.models import (
     AirlineAssistantResponse,
@@ -13,6 +18,8 @@ from ai_quality.models import (
     SafetyResult,
 )
 from ai_quality.prompt_registry import Prompt
+from ai_quality.provider_config import RealLLMProviderSettings
+from observability.context import get_context
 from observability.models import FailureCategory
 from observability.tracing import TracingFacade, create_tracing_facade
 
@@ -251,23 +258,60 @@ class DeterministicLLMProvider(LLMProvider):
         return "I can help with airline search, booking, baggage, check-in, fares, seats, and refunds."
 
 
+class RealProviderError(RuntimeError):
+    """Safe base exception for provider-boundary failures."""
+
+
+class RealProviderDisabledError(RealProviderError):
+    pass
+
+
+class RealProviderHTTPError(RealProviderError):
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__(f"Real LLM provider returned HTTP {status_code}")
+
+
+class RealProviderResponseError(RealProviderError):
+    pass
+
+
 class OptionalRealLLMProvider(LLMProvider):
-    """Disabled-by-default adapter seam for future real LLM integrations."""
+    """Opt-in provider-neutral HTTP adapter for structured LLM responses."""
 
     def __init__(
         self,
         *,
-        api_key_env: str = "REAL_LLM_API_KEY",
+        settings: RealLLMProviderSettings | None = None,
+        api_key: str | None = None,
+        environment: dict[str, str] | None = None,
+        client: httpx.Client | None = None,
+        transport: httpx.BaseTransport | None = None,
         tracer: TracingFacade | None = None,
     ) -> None:
-        self.api_key_env = api_key_env
+        if client is not None and transport is not None:
+            raise ValueError("client and transport cannot both be provided")
+        env = environment if environment is not None else os.environ
+        self.settings = settings or RealLLMProviderSettings.from_env(env)
+        resolved_api_key = api_key if api_key is not None else env.get(
+            "AI_REAL_PROVIDER_API_KEY", ""
+        )
+        self.settings.validate(api_key_present=bool(resolved_api_key))
+        self._api_key = resolved_api_key
         self.tracer = tracer or create_tracing_facade()
+        self._owns_client = client is None
+        self._client = client or httpx.Client(
+            timeout=self.settings.timeout_seconds,
+            transport=transport,
+        )
 
     def health_check(self) -> bool:
-        return bool(os.getenv(self.api_key_env))
+        return self.settings.enabled and bool(self._api_key)
 
     def generate(self, user_input: str, *, prompt: Prompt, context: str | None = None) -> str:
-        return self._raise_unavailable(user_input, operation="generate")
+        return self.generate_structured(
+            user_input, prompt=prompt, context=context
+        ).response
 
     def generate_structured(
         self,
@@ -277,21 +321,117 @@ class OptionalRealLLMProvider(LLMProvider):
         case: GoldenCase | None = None,
         context: str | None = None,
     ) -> AirlineAssistantResponse:
-        return self._raise_unavailable(user_input, operation="generate_structured")
-
-    def _raise_unavailable(self, user_input: str, *, operation: str):
+        attributes = {
+            "provider_name": "http-json",
+            "model_name": self.settings.model or "unconfigured",
+            "operation": "generate_structured",
+            "prompt_length": len(user_input),
+            "timeout_seconds": self.settings.timeout_seconds,
+        }
         with self.tracer.start_span(
-            "llm.generation",
-            operation_type="llm",
-            attributes={
-                "provider_name": "optional_real",
-                "model_name": "unconfigured",
-                "operation": operation,
-                "prompt_length": len(user_input),
-            },
+            "llm.generation", operation_type="llm", attributes=attributes
         ) as span:
-            error = NotImplementedError(
-                "Real LLM providers are intentionally not wired in Phase 8."
-            )
-            span.record_exception(error, FailureCategory.MODEL)
-            raise error
+            if not self.settings.enabled:
+                error = RealProviderDisabledError("Real LLM provider is disabled")
+                span.record_exception(error, FailureCategory.PROVIDER)
+                raise error
+
+            started_at = time.perf_counter()
+            try:
+                response = self._client.post(
+                    self.settings.base_url,
+                    headers=self._headers(),
+                    json=self._request_payload(user_input, prompt, context),
+                )
+            except httpx.TimeoutException as exc:
+                span.record_exception(exc, FailureCategory.TIMEOUT)
+                raise
+            except httpx.RequestError as exc:
+                span.record_exception(exc, FailureCategory.NETWORK)
+                raise
+
+            span.set_attribute("latency_ms", (time.perf_counter() - started_at) * 1000)
+            span.set_attribute("status_code", response.status_code)
+            if response.is_error:
+                error = RealProviderHTTPError(response.status_code)
+                span.record_exception(error, _http_failure_category(response.status_code))
+                raise error
+
+            try:
+                payload = response.json()
+                content, token_count = _parse_provider_envelope(payload)
+            except (json.JSONDecodeError, TypeError, KeyError, IndexError, ValueError):
+                error = RealProviderResponseError("Provider response envelope is malformed")
+                span.record_exception(error, FailureCategory.PROVIDER)
+                raise error from None
+
+            span.set_attribute("response_length", len(content))
+            if token_count is not None:
+                span.set_attribute("token_count", token_count)
+            try:
+                structured = json.loads(content) if isinstance(content, str) else content
+                result = AirlineAssistantResponse.model_validate(structured)
+            except (json.JSONDecodeError, ValidationError, TypeError):
+                error = RealProviderResponseError(
+                    "Provider structured response failed contract validation"
+                )
+                span.record_exception(error, FailureCategory.CONTRACT)
+                raise error from None
+            return result
+
+    def close(self) -> None:
+        if self._owns_client:
+            self._client.close()
+
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+        }
+        context = get_context()
+        if context is not None:
+            headers["X-Trace-ID"] = context.trace_id
+            headers["X-Correlation-ID"] = context.correlation_id
+        return headers
+
+    def _request_payload(
+        self, user_input: str, prompt: Prompt, context: str | None
+    ) -> dict[str, Any]:
+        messages = [{"role": "system", "content": prompt.text}]
+        if context:
+            messages.append({"role": "system", "content": context})
+        messages.append({"role": "user", "content": user_input})
+        payload: dict[str, Any] = {
+            "model": self.settings.model,
+            "messages": messages,
+        }
+        if self.settings.require_structured_output:
+            payload["response_format"] = {"type": "json_object"}
+        return payload
+
+
+def _parse_provider_envelope(payload: Any) -> tuple[str | dict[str, Any], int | None]:
+    if not isinstance(payload, dict):
+        raise TypeError("provider response must be an object")
+    choices = payload["choices"]
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("provider response must contain choices")
+    content = choices[0]["message"]["content"]
+    if not isinstance(content, (str, dict)):
+        raise TypeError("provider content must be text or an object")
+    usage = payload.get("usage")
+    token_count = usage.get("total_tokens") if isinstance(usage, dict) else None
+    if token_count is not None and (not isinstance(token_count, int) or token_count < 0):
+        token_count = None
+    return content, token_count
+
+
+def _http_failure_category(status_code: int) -> FailureCategory:
+    if status_code == 401:
+        return FailureCategory.AUTHENTICATION
+    if status_code == 403:
+        return FailureCategory.AUTHORIZATION
+    if status_code == 429:
+        return FailureCategory.RATE_LIMIT
+    return FailureCategory.PROVIDER
