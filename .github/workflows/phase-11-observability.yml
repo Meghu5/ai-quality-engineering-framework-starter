@@ -42,6 +42,10 @@ jobs:
           AI_OBSERVABILITY_EXPORTER: "json"
         run: python -m pytest -p observability.pytest_plugin tests/observability tests/ai_eval -q
 
+      - name: Generate operational observability analysis
+        continue-on-error: true
+        run: python -m observability.operational_report
+
       - name: Run regression suite with telemetry disabled
         env:
           AI_OBSERVABILITY_ENABLED: "false"

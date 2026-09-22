@@ -818,6 +818,19 @@ transmission, flush, and shutdown failures are fail-open and cannot replace
 application results or exceptions. Tests use in-memory fakes and require no external
 OTLP backend.
 
+CI correlation records SHA-256 test IDs, redacted node IDs, and links between tests,
+traces, spans, evaluation cases, and RAG lineage. Generate a deterministic operational
+summary from the existing Phase 10 and Phase 11 JSON evidence with:
+
+```bash
+python -m observability.operational_report
+```
+
+The command writes `reports/observability/operational-analysis.json`. The report
+summarizes failures, latency, provider/model and operation usage, trace integrity,
+lineage completeness, and CI/evaluation coverage. Missing evidence is represented as
+unavailable, reporting remains fail-open, and no live telemetry backend is required.
+
 Run the foundation tests with:
 
 ```bash
