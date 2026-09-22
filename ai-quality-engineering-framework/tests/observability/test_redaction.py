@@ -57,3 +57,19 @@ def test_pii_inside_allowed_string_values_is_redacted():
 
 def test_payment_card_text_is_redacted():
     assert "4111" not in redact_text("card 4111 1111 1111 1111")
+
+
+def test_embedded_credentials_and_passport_values_are_redacted():
+    value = (
+        "Bearer token.value api_key=super-secret password=hunter2 "
+        "cookie=session-value TEST-PASSPORT-12345"
+    )
+    redacted = redact_text(value)
+    for secret in (
+        "token.value",
+        "super-secret",
+        "hunter2",
+        "session-value",
+        "TEST-PASSPORT-12345",
+    ):
+        assert secret not in redacted

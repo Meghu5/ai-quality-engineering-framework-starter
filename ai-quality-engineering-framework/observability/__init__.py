@@ -10,7 +10,7 @@ from observability.context import (
 )
 from observability.exporters import InMemoryExporter, JsonEvidenceExporter
 from observability.models import FailureCategory, SpanEvidence, TraceEnvelope, TraceStatus
-from observability.tracing import TracingFacade
+from observability.tracing import TracingFacade, create_tracing_facade
 
 __all__ = [
     "FailureCategory",
@@ -22,6 +22,7 @@ __all__ = [
     "TraceStatus",
     "TracingFacade",
     "clear_context",
+    "create_tracing_facade",
     "get_correlation_id",
     "get_span_id",
     "get_trace_id",

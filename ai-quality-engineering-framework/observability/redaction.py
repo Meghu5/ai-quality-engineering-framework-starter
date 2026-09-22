@@ -8,19 +8,25 @@ from typing import Any
 REDACTED = "[REDACTED]"
 
 SAFE_ATTRIBUTE_KEYS = {
+    "answer_length",
     "case_id",
     "chunk_id",
     "context_count",
     "document_id",
     "evaluation_status",
     "exception_type",
+    "http_host",
+    "http_method",
+    "http_path",
     "latency_ms",
     "model_name",
     "operation",
     "prompt_length",
     "provider_name",
     "response_length",
+    "retrieval_count",
     "status_code",
+    "timeout_seconds",
     "token_count",
 }
 
@@ -45,6 +51,13 @@ _SENSITIVE_KEY_PARTS = (
 _EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 _PHONE = re.compile(r"(?<!\w)(?:\+?\d[\d .()\-]{7,}\d)(?!\w)")
 _CARD = re.compile(r"(?<!\d)(?:\d[ -]*?){13,19}(?!\d)")
+_BEARER = re.compile(r"\bbearer\s+[A-Z0-9._~+/=-]+", re.IGNORECASE)
+_SECRET_ASSIGNMENT = re.compile(
+    r"\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|cookie)"
+    r"\s*[:=]\s*\S+",
+    re.IGNORECASE,
+)
+_PASSPORT = re.compile(r"\b(?:TEST-)?PASSPORT[-_ ]?[A-Z0-9-]{5,}\b", re.IGNORECASE)
 
 
 def sanitize_attributes(attributes: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -64,7 +77,10 @@ def sanitize_attributes(attributes: Mapping[str, Any] | None) -> dict[str, Any]:
 def redact_text(value: str) -> str:
     redacted = _EMAIL.sub(REDACTED, value)
     redacted = _PHONE.sub(REDACTED, redacted)
-    return _CARD.sub(REDACTED, redacted)
+    redacted = _CARD.sub(REDACTED, redacted)
+    redacted = _BEARER.sub(REDACTED, redacted)
+    redacted = _SECRET_ASSIGNMENT.sub(REDACTED, redacted)
+    return _PASSPORT.sub(REDACTED, redacted)
 
 
 def _is_sensitive_key(key: str) -> bool:

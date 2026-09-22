@@ -13,6 +13,8 @@ from ai_quality.models import (
     SafetyResult,
 )
 from ai_quality.prompt_registry import Prompt
+from observability.models import FailureCategory
+from observability.tracing import TracingFacade, create_tracing_facade
 
 
 AIRPORT_ALIASES = {
@@ -63,11 +65,42 @@ class LLMProvider(ABC):
 class DeterministicLLMProvider(LLMProvider):
     """Rule-based provider for reproducible tests. This is not a real LLM."""
 
+    def __init__(self, *, tracer: TracingFacade | None = None) -> None:
+        self.tracer = tracer or create_tracing_facade()
+
     def generate(self, user_input: str, *, prompt: Prompt, context: str | None = None) -> str:
         response = self.generate_structured(user_input, prompt=prompt, context=context)
         return response.response
 
     def generate_structured(
+        self,
+        user_input: str,
+        *,
+        prompt: Prompt,
+        case: GoldenCase | None = None,
+        context: str | None = None,
+    ) -> AirlineAssistantResponse:
+        attributes = {
+            "provider_name": "deterministic",
+            "model_name": "rule-based-airline-assistant",
+            "operation": "generate_structured",
+            "prompt_length": len(user_input),
+            "case_id": case.id if case else None,
+        }
+        with self.tracer.start_span(
+            "llm.generation", operation_type="llm", attributes=attributes
+        ) as span:
+            try:
+                response = self._generate_structured(
+                    user_input, prompt=prompt, case=case, context=context
+                )
+            except Exception as exc:
+                span.record_exception(exc, FailureCategory.MODEL)
+                raise
+            span.set_attribute("response_length", len(response.response))
+            return response
+
+    def _generate_structured(
         self,
         user_input: str,
         *,
@@ -221,14 +254,20 @@ class DeterministicLLMProvider(LLMProvider):
 class OptionalRealLLMProvider(LLMProvider):
     """Disabled-by-default adapter seam for future real LLM integrations."""
 
-    def __init__(self, *, api_key_env: str = "REAL_LLM_API_KEY") -> None:
+    def __init__(
+        self,
+        *,
+        api_key_env: str = "REAL_LLM_API_KEY",
+        tracer: TracingFacade | None = None,
+    ) -> None:
         self.api_key_env = api_key_env
+        self.tracer = tracer or create_tracing_facade()
 
     def health_check(self) -> bool:
         return bool(os.getenv(self.api_key_env))
 
     def generate(self, user_input: str, *, prompt: Prompt, context: str | None = None) -> str:
-        raise NotImplementedError("Real LLM providers are intentionally not wired in Phase 8.")
+        return self._raise_unavailable(user_input, operation="generate")
 
     def generate_structured(
         self,
@@ -238,4 +277,21 @@ class OptionalRealLLMProvider(LLMProvider):
         case: GoldenCase | None = None,
         context: str | None = None,
     ) -> AirlineAssistantResponse:
-        raise NotImplementedError("Real LLM providers are intentionally not wired in Phase 8.")
+        return self._raise_unavailable(user_input, operation="generate_structured")
+
+    def _raise_unavailable(self, user_input: str, *, operation: str):
+        with self.tracer.start_span(
+            "llm.generation",
+            operation_type="llm",
+            attributes={
+                "provider_name": "optional_real",
+                "model_name": "unconfigured",
+                "operation": operation,
+                "prompt_length": len(user_input),
+            },
+        ) as span:
+            error = NotImplementedError(
+                "Real LLM providers are intentionally not wired in Phase 8."
+            )
+            span.record_exception(error, FailureCategory.MODEL)
+            raise error

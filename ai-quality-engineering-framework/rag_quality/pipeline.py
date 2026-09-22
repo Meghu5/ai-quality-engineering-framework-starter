@@ -5,6 +5,8 @@ from pathlib import Path
 
 from ai_quality.prompt_registry import PromptRegistry
 from ai_quality.providers import DeterministicLLMProvider
+from observability.models import FailureCategory
+from observability.tracing import TracingFacade, create_tracing_facade
 from rag_quality.chunking import DeterministicChunker
 from rag_quality.context import RagContextBuilder
 from rag_quality.document_loader import DocumentLoader
@@ -30,17 +32,72 @@ class DeterministicRagPipeline:
         *,
         document_loader: DocumentLoader | None = None,
         chunker: DeterministicChunker | None = None,
+        tracer: TracingFacade | None = None,
     ) -> None:
+        self.tracer = tracer or create_tracing_facade()
         self.documents = (document_loader or DocumentLoader()).load()
         self.chunker = chunker or DeterministicChunker()
         self.chunks = self.chunker.chunk_documents(self.documents)
         self.retriever = LexicalRetriever(self.chunks)
         self.context_builder = RagContextBuilder()
-        self.llm_provider = DeterministicLLMProvider()
+        self.llm_provider = DeterministicLLMProvider(tracer=self.tracer)
         self.prompt = PromptRegistry().get("airline_assistant", "v1")
 
     def answer_case(self, case: RagCase) -> RagAnswer:
-        retrieved = self.retriever.retrieve(case.question, top_k=max(case.expected_top_k, 5))
+        with self.tracer.start_trace(
+            "rag.operation",
+            operation_type="rag",
+            attributes={"case_id": case.case_id},
+        ):
+            return self._answer_case(case)
+
+    def _answer_case(self, case: RagCase) -> RagAnswer:
+        with self.tracer.start_span(
+            "rag.retrieval",
+            operation_type="retrieval",
+            attributes={"case_id": case.case_id},
+        ) as retrieval_span:
+            retrieved = self.retriever.retrieve(
+                case.question, top_k=max(case.expected_top_k, 5)
+            )
+            retrieval_span.set_attribute("retrieval_count", len(retrieved))
+            retrieval_span.set_attribute(
+                "document_id", [item.chunk.document_id for item in retrieved]
+            )
+            retrieval_span.set_attribute(
+                "chunk_id", [item.chunk.chunk_id for item in retrieved]
+            )
+
+        with self.tracer.start_span(
+            "llm.generation",
+            operation_type="llm",
+            attributes={
+                "case_id": case.case_id,
+                "context_count": len(retrieved),
+            },
+        ) as generation_span:
+            answer = self._build_answer(case, retrieved)
+            generation_span.set_attribute("answer_length", len(answer.answer))
+
+        if self.tracer.enabled:
+            with self.tracer.start_span(
+                "ai.evaluation",
+                operation_type="evaluation",
+                attributes={"case_id": case.case_id},
+            ) as evaluation_span:
+                try:
+                    evaluation = RagEvaluator().evaluate(case, answer)
+                    evaluation_span.set_attribute(
+                        "evaluation_status",
+                        "passed" if evaluation.overall_passed else "failed",
+                    )
+                except Exception as exc:
+                    evaluation_span.record_exception(exc, FailureCategory.INTERNAL)
+        return answer
+
+    def _build_answer(
+        self, case: RagCase, retrieved: list[RetrievedChunk]
+    ) -> RagAnswer:
         if case.expect_no_answer or not retrieved:
             return RagAnswer(
                 case_id=case.case_id,

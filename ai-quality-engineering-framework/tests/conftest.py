@@ -3,6 +3,30 @@ import pytest
 from clients.api_client import ApiClient
 from clients.chat_client import ChatClient
 from config.settings import Settings
+from observability.config import ObservabilitySettings
+from observability.context import clear_context
+from observability.exporters import InMemoryExporter
+from observability.tracing import TracingFacade
+
+
+@pytest.fixture(autouse=True)
+def isolated_observability_context():
+    clear_context()
+    yield
+    clear_context()
+
+
+@pytest.fixture
+def observability_exporter():
+    return InMemoryExporter()
+
+
+@pytest.fixture
+def observability_tracer(observability_exporter):
+    return TracingFacade(
+        settings=ObservabilitySettings(enabled=True, exporter="memory"),
+        exporter=observability_exporter,
+    )
 
 
 @pytest.fixture(scope="session")

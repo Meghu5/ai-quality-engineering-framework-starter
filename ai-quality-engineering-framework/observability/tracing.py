@@ -8,7 +8,7 @@ from typing import Any
 
 from observability.config import DEFAULT_OBSERVABILITY_SETTINGS, ObservabilitySettings
 from observability.context import generate_span_id, get_context, use_context
-from observability.exporters import SpanExporter
+from observability.exporters import JsonEvidenceExporter, SpanExporter
 from observability.models import FailureCategory, SpanEvidence, TraceStatus
 from observability.redaction import sanitize_attributes
 
@@ -194,3 +194,13 @@ class TracingFacade:
                 self.exporter.export(evidence)
         except Exception:
             logger.exception("Observability exporter failed")
+
+
+def create_tracing_facade(
+    settings: ObservabilitySettings | None = None,
+) -> TracingFacade:
+    resolved = settings or ObservabilitySettings.from_env()
+    exporter: SpanExporter | None = None
+    if resolved.enabled and resolved.exporter == "json":
+        exporter = JsonEvidenceExporter()
+    return TracingFacade(settings=resolved, exporter=exporter)
