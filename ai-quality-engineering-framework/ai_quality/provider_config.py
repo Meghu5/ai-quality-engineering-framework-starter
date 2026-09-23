@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import asdict, dataclass
 from urllib.parse import urlsplit
@@ -9,6 +10,8 @@ DEFAULT_REAL_PROVIDER_TIMEOUT_SECONDS = 30.0
 MAX_REAL_PROVIDER_TIMEOUT_SECONDS = 120.0
 DEFAULT_REAL_PROVIDER_MAX_ATTEMPTS = 3
 MAX_REAL_PROVIDER_MAX_ATTEMPTS = 5
+DEFAULT_REAL_PROVIDER_MAX_RETRY_DELAY_SECONDS = 5.0
+MAX_REAL_PROVIDER_MAX_RETRY_DELAY_SECONDS = 120.0
 
 
 def _enabled(value: str | None) -> bool:
@@ -35,6 +38,7 @@ class RealLLMProviderSettings:
     model: str = ""
     timeout_seconds: float = DEFAULT_REAL_PROVIDER_TIMEOUT_SECONDS
     max_attempts: int = DEFAULT_REAL_PROVIDER_MAX_ATTEMPTS
+    max_retry_delay_seconds: float = DEFAULT_REAL_PROVIDER_MAX_RETRY_DELAY_SECONDS
     require_structured_output: bool = True
     required: bool = False
 
@@ -63,12 +67,23 @@ class RealLLMProviderSettings:
             raise ValueError(
                 "AI_REAL_PROVIDER_MAX_ATTEMPTS must be an integer"
             ) from exc
+        retry_delay_value = env.get(
+            "AI_REAL_PROVIDER_MAX_RETRY_DELAY_SECONDS",
+            str(DEFAULT_REAL_PROVIDER_MAX_RETRY_DELAY_SECONDS),
+        ).strip()
+        try:
+            max_retry_delay_seconds = float(retry_delay_value)
+        except ValueError as exc:
+            raise ValueError(
+                "AI_REAL_PROVIDER_MAX_RETRY_DELAY_SECONDS must be a number"
+            ) from exc
         settings = cls(
             enabled=_enabled(env.get("AI_REAL_PROVIDER_ENABLED")),
             base_url=env.get("AI_REAL_PROVIDER_BASE_URL", "").strip(),
             model=env.get("AI_REAL_PROVIDER_MODEL", "").strip(),
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
+            max_retry_delay_seconds=max_retry_delay_seconds,
             require_structured_output=_enabled(
                 env.get("AI_REAL_PROVIDER_REQUIRE_STRUCTURED_OUTPUT", "true")
             ),
@@ -97,6 +112,21 @@ class RealLLMProviderSettings:
             raise ValueError(
                 "AI_REAL_PROVIDER_MAX_ATTEMPTS must be between 1 "
                 f"and {MAX_REAL_PROVIDER_MAX_ATTEMPTS}"
+            )
+        if isinstance(self.max_retry_delay_seconds, bool) or not isinstance(
+            self.max_retry_delay_seconds, (int, float)
+        ):
+            raise ValueError(
+                "AI_REAL_PROVIDER_MAX_RETRY_DELAY_SECONDS must be a number"
+            )
+        if not math.isfinite(self.max_retry_delay_seconds) or not (
+            0
+            < self.max_retry_delay_seconds
+            <= MAX_REAL_PROVIDER_MAX_RETRY_DELAY_SECONDS
+        ):
+            raise ValueError(
+                "AI_REAL_PROVIDER_MAX_RETRY_DELAY_SECONDS must be greater than zero "
+                f"and at most {MAX_REAL_PROVIDER_MAX_RETRY_DELAY_SECONDS:g}"
             )
         if not self.enabled:
             return

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import format_datetime, parsedate_to_datetime
 
 import httpx
 
@@ -8,6 +10,33 @@ from observability.models import FailureCategory
 
 
 TRANSIENT_HTTP_STATUSES = frozenset({500, 502, 503, 504})
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def parse_retry_after(value: str | None, *, current_time: datetime) -> float | None:
+    """Return normalized seconds for a valid Retry-After value."""
+    if value is None or not value or value != value.strip():
+        return None
+    if value.isascii() and value.isdecimal():
+        try:
+            return float(int(value))
+        except (ValueError, OverflowError):
+            return None
+    try:
+        target = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if target.tzinfo is None or current_time.tzinfo is None:
+        return None
+    if format_datetime(target, usegmt=True) != value:
+        return None
+    try:
+        return max(0.0, (target - current_time).total_seconds())
+    except (TypeError, OverflowError):
+        return None
 
 
 @dataclass(frozen=True)

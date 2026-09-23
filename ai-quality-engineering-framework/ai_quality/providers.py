@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 import re
 import json
+import math
 import time
+from datetime import datetime
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any
@@ -26,6 +28,8 @@ from ai_quality.provider_resilience import (
     classify_http_failure,
     classify_transport_failure,
     exponential_backoff,
+    parse_retry_after,
+    utc_now,
 )
 from observability.context import get_context
 from observability.models import FailureCategory
@@ -302,12 +306,12 @@ class RealProviderResponseError(RealProviderError):
     pass
 
 
-class _TransportExceptionPrivacyBoundary:
+class _ProviderExceptionPrivacyBoundary:
     def __enter__(self) -> None:
         return None
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
-        if isinstance(exc, RealProviderTransportError):
+        if isinstance(exc, RealProviderError):
             exc.__traceback__ = None
             exc.__cause__ = None
             exc.__context__ = None
@@ -328,6 +332,7 @@ class OptionalRealLLMProvider(LLMProvider):
         tracer: TracingFacade | None = None,
         sleeper: Callable[[float], None] = time.sleep,
         backoff: Callable[[int], float] = exponential_backoff,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         if client is not None and transport is not None:
             raise ValueError("client and transport cannot both be provided")
@@ -341,6 +346,7 @@ class OptionalRealLLMProvider(LLMProvider):
         self.tracer = tracer or create_tracing_facade()
         self._sleeper = sleeper
         self._backoff = backoff
+        self._clock = clock
         self._owns_client = client is None
         self._client = client or httpx.Client(
             timeout=self.settings.timeout_seconds,
@@ -372,7 +378,7 @@ class OptionalRealLLMProvider(LLMProvider):
             "prompt_length": len(user_input),
             "timeout_seconds": self.settings.timeout_seconds,
         }
-        with _TransportExceptionPrivacyBoundary(), self.tracer.start_span(
+        with _ProviderExceptionPrivacyBoundary(), self.tracer.start_span(
             "llm.generation", operation_type="llm", attributes=attributes
         ) as span:
             if not self.settings.enabled:
@@ -383,6 +389,7 @@ class OptionalRealLLMProvider(LLMProvider):
             started_at = time.perf_counter()
             response: httpx.Response | None = None
             completed_attempt = 0
+            remaining_retry_delay = self.settings.max_retry_delay_seconds
             for attempt in range(1, self.settings.max_attempts + 1):
                 completed_attempt = attempt
                 transport_error: RealProviderTransportError | None = None
@@ -400,7 +407,9 @@ class OptionalRealLLMProvider(LLMProvider):
                         max_attempts=self.settings.max_attempts,
                     )
                     if failure.retryable and attempt < self.settings.max_attempts:
-                        self._sleep_before_retry(attempt)
+                        remaining_retry_delay = self._sleep_before_retry(
+                            attempt, remaining_budget=remaining_retry_delay
+                        )
                         continue
                     transport_error = RealProviderTransportError(failure=failure)
 
@@ -419,7 +428,20 @@ class OptionalRealLLMProvider(LLMProvider):
                     max_attempts=self.settings.max_attempts,
                 )
                 if failure.retryable and attempt < self.settings.max_attempts:
-                    self._sleep_before_retry(attempt)
+                    retry_after_value = response.headers.get("Retry-After")
+                    retry_after = (
+                        parse_retry_after(
+                            retry_after_value,
+                            current_time=self._clock(),
+                        )
+                        if retry_after_value is not None
+                        else None
+                    )
+                    remaining_retry_delay = self._sleep_before_retry(
+                        attempt,
+                        retry_after_seconds=retry_after,
+                        remaining_budget=remaining_retry_delay,
+                    )
                     continue
                 error = RealProviderHTTPError(
                     response.status_code, failure=failure
@@ -468,11 +490,33 @@ class OptionalRealLLMProvider(LLMProvider):
                 raise error from None
             return result
 
-    def _sleep_before_retry(self, attempt: int) -> None:
-        delay = self._backoff(attempt)
-        if delay < 0:
-            raise ValueError("Retry backoff must not be negative")
-        self._sleeper(delay)
+    def _sleep_before_retry(
+        self,
+        attempt: int,
+        *,
+        remaining_budget: float,
+        retry_after_seconds: float | None = None,
+    ) -> float:
+        base_delay = self._backoff(attempt)
+        if (
+            isinstance(base_delay, bool)
+            or not isinstance(base_delay, (int, float))
+            or not math.isfinite(base_delay)
+            or base_delay < 0
+        ):
+            raise ValueError("Retry backoff must be a finite non-negative number")
+        selected_delay = (
+            retry_after_seconds
+            if retry_after_seconds is not None
+            else float(base_delay)
+        )
+        per_attempt_delay = min(
+            selected_delay, self.settings.max_retry_delay_seconds
+        )
+        bounded_delay = min(per_attempt_delay, remaining_budget)
+        if bounded_delay > 0:
+            self._sleeper(bounded_delay)
+        return remaining_budget - bounded_delay
 
     def close(self) -> None:
         if self._owns_client:

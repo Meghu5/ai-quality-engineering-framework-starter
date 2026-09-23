@@ -47,6 +47,7 @@ def _settings(**overrides) -> RealLLMProviderSettings:
         "model": "airline-model-v1",
         "timeout_seconds": 10.0,
         "max_attempts": 3,
+        "max_retry_delay_seconds": 5.0,
         "require_structured_output": True,
         "required": False,
     }
@@ -118,6 +119,7 @@ def test_enabled_provider_accepts_valid_configuration():
             "model": "airline-model-v1",
             "timeout_seconds": 10.0,
             "max_attempts": 3,
+            "max_retry_delay_seconds": 5.0,
             "require_structured_output": True,
             "required": False,
         }
@@ -151,6 +153,7 @@ def test_environment_configuration_does_not_retain_api_key():
         "AI_REAL_PROVIDER_MODEL": "airline-model-v1",
         "AI_REAL_PROVIDER_TIMEOUT_SECONDS": "15",
         "AI_REAL_PROVIDER_MAX_ATTEMPTS": "3",
+        "AI_REAL_PROVIDER_MAX_RETRY_DELAY_SECONDS": "5",
         "AI_REAL_PROVIDER_REQUIRE_STRUCTURED_OUTPUT": "true",
         "AI_REAL_PROVIDER_REQUIRED": "false",
     }
@@ -181,6 +184,27 @@ def test_required_environment_flag_accepts_explicit_booleans(value, expected):
 def test_required_environment_flag_rejects_malformed_values(value):
     with pytest.raises(ValueError, match="AI_REAL_PROVIDER_REQUIRED"):
         RealLLMProviderSettings.from_env({"AI_REAL_PROVIDER_REQUIRED": value})
+
+
+@pytest.mark.parametrize("value", [0, -1, 121, True, False, float("inf"), float("nan"), "5"])
+def test_retry_delay_budget_rejects_invalid_direct_values(value):
+    with pytest.raises(ValueError, match="AI_REAL_PROVIDER_MAX_RETRY_DELAY_SECONDS"):
+        _settings(max_retry_delay_seconds=value).validate()
+
+
+@pytest.mark.parametrize("value", [0.1, 5, 120.0])
+def test_retry_delay_budget_accepts_bounded_numeric_values(value):
+    settings = _settings(max_retry_delay_seconds=value)
+    settings.validate()
+    assert settings.max_retry_delay_seconds == value
+
+
+@pytest.mark.parametrize("value", ["", "abc", "nan", "inf", "0", "-1", "121"])
+def test_retry_delay_budget_rejects_invalid_environment_values(value):
+    with pytest.raises(ValueError, match="AI_REAL_PROVIDER_MAX_RETRY_DELAY_SECONDS"):
+        RealLLMProviderSettings.from_env(
+            {"AI_REAL_PROVIDER_MAX_RETRY_DELAY_SECONDS": value}
+        )
 
 
 def test_successful_mocked_provider_response(prompt):

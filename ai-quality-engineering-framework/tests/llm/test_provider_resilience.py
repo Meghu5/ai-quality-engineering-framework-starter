@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 import traceback
 
 import httpx
@@ -13,6 +14,7 @@ from ai_quality.provider_resilience import (
     TRANSIENT_HTTP_STATUSES,
     classify_http_failure,
     classify_transport_failure,
+    parse_retry_after,
 )
 from ai_quality.providers import (
     DeterministicLLMProvider,
@@ -44,13 +46,16 @@ def prompt() -> Prompt:
     )
 
 
-def _settings(*, max_attempts: int = 3) -> RealLLMProviderSettings:
+def _settings(
+    *, max_attempts: int = 3, max_retry_delay_seconds: float = 5.0
+) -> RealLLMProviderSettings:
     return RealLLMProviderSettings(
         enabled=True,
         base_url="https://llm.example.test/v1/chat/completions",
         model="airline-model-v1",
         timeout_seconds=10.0,
         max_attempts=max_attempts,
+        max_retry_delay_seconds=max_retry_delay_seconds,
         require_structured_output=True,
     )
 
@@ -103,18 +108,381 @@ def _provider(
     delays=None,
     tracer=None,
     headers=None,
+    max_retry_delay_seconds=5.0,
+    backoff=None,
+    clock=None,
 ):
     recorded_calls = calls if calls is not None else []
     recorded_delays = delays if delays is not None else []
     return OptionalRealLLMProvider(
-        settings=_settings(max_attempts=max_attempts),
+        settings=_settings(
+            max_attempts=max_attempts,
+            max_retry_delay_seconds=max_retry_delay_seconds,
+        ),
         api_key=API_KEY,
         transport=httpx.MockTransport(
             _scripted_handler(outcomes, recorded_calls, headers=headers)
         ),
         tracer=tracer,
         sleeper=recorded_delays.append,
+        **({"backoff": backoff} if backoff is not None else {}),
+        **({"clock": clock} if clock is not None else {}),
     )
+
+
+def _assert_controlled_exception_is_private(error, sensitive_values):
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    frames = []
+    current = error.__traceback__
+    while current is not None:
+        frames.append(current.tb_frame)
+        current = current.tb_next
+    assert frames
+    assert all(
+        frame.f_globals.get("__name__") != "ai_quality.providers"
+        for frame in frames
+    )
+
+    reachable = [error.args, vars(error)]
+    seen = set()
+    visible = []
+    while reachable:
+        value = reachable.pop()
+        if id(value) in seen:
+            continue
+        seen.add(id(value))
+        assert not isinstance(
+            value, (httpx.Request, httpx.Response, OptionalRealLLMProvider)
+        )
+        if isinstance(value, dict):
+            reachable.extend(value.keys())
+            reachable.extend(value.values())
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            reachable.extend(value)
+        elif isinstance(value, ProviderFailureMetadata):
+            reachable.append(value.safe_dict())
+        else:
+            visible.append(repr(value))
+    serialized = " ".join(visible)
+    assert all(sensitive not in serialized for sensitive in sensitive_values)
+
+
+FIXED_NOW = datetime(2026, 10, 21, 7, 27, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("3", 3.0),
+        ("Wed, 21 Oct 2026 07:28:00 GMT", 60.0),
+        ("Wed, 21 Oct 2026 07:26:00 GMT", 0.0),
+    ],
+)
+def test_retry_after_supported_forms_are_normalized(value, expected):
+    assert parse_retry_after(value, current_time=FIXED_NOW) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", " ", "-1", "1.5", "1e3", "abc", "tomorrow", "3, 4"],
+)
+def test_invalid_retry_after_values_are_ignored(value):
+    assert parse_retry_after(value, current_time=FIXED_NOW) is None
+
+
+def test_retry_after_delta_overrides_backoff_within_budget(prompt):
+    delays = []
+    backoff_attempts = []
+
+    def backoff(attempt):
+        backoff_attempts.append(attempt)
+        return 0.25
+
+    provider = _provider(
+        [httpx.Response(429, headers={"Retry-After": "3"}), _success_response()],
+        delays=delays,
+        backoff=backoff,
+        clock=lambda: FIXED_NOW,
+    )
+    try:
+        provider.generate_structured("hello", prompt=prompt)
+    finally:
+        provider.close()
+    assert backoff_attempts == [1]
+    assert delays == [3.0]
+
+
+def test_retry_after_http_date_uses_injected_clock(prompt):
+    delays = []
+    provider = _provider(
+        [
+            httpx.Response(
+                503, headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}
+            ),
+            _success_response(),
+        ],
+        delays=delays,
+        max_retry_delay_seconds=90.0,
+        clock=lambda: FIXED_NOW,
+    )
+    try:
+        provider.generate_structured("hello", prompt=prompt)
+    finally:
+        provider.close()
+    assert delays == [60.0]
+
+
+def test_excessive_retry_after_is_capped_by_configured_budget(prompt):
+    delays = []
+    provider = _provider(
+        [
+            httpx.Response(429, headers={"Retry-After": "999999999"}),
+            _success_response(),
+        ],
+        delays=delays,
+        max_retry_delay_seconds=4.0,
+        clock=lambda: FIXED_NOW,
+    )
+    try:
+        provider.generate_structured("hello", prompt=prompt)
+    finally:
+        provider.close()
+    assert delays == [4.0]
+
+
+def test_invalid_retry_after_falls_back_to_backoff(prompt):
+    delays = []
+    provider = _provider(
+        [httpx.Response(429, headers={"Retry-After": "tomorrow"}), _success_response()],
+        delays=delays,
+        backoff=lambda attempt: 0.75,
+        clock=lambda: FIXED_NOW,
+    )
+    try:
+        provider.generate_structured("hello", prompt=prompt)
+    finally:
+        provider.close()
+    assert delays == [0.75]
+
+
+def test_clock_is_not_called_without_retry_after_header(prompt):
+    provider = _provider(
+        [httpx.Response(503), _success_response()],
+        clock=lambda: pytest.fail("clock called without Retry-After"),
+    )
+    try:
+        provider.generate_structured("hello", prompt=prompt)
+    finally:
+        provider.close()
+
+
+def test_retry_delay_is_capped_by_cumulative_budget(prompt):
+    delays = []
+    provider = _provider(
+        [
+            httpx.Response(503),
+            httpx.Response(503),
+            httpx.Response(503),
+            _success_response(),
+        ],
+        max_attempts=4,
+        max_retry_delay_seconds=5.0,
+        delays=delays,
+        backoff=lambda attempt: {1: 2.0, 2: 2.0, 3: 10.0}[attempt],
+    )
+    try:
+        provider.generate_structured("hello", prompt=prompt)
+    finally:
+        provider.close()
+    assert delays == [2.0, 2.0, 1.0]
+    assert sum(delays) == 5.0
+
+
+def test_exhausted_retry_delay_budget_skips_sleep_but_preserves_attempts(prompt):
+    calls = []
+    delays = []
+    provider = _provider(
+        [httpx.Response(503), httpx.Response(503), _success_response()],
+        max_attempts=3,
+        max_retry_delay_seconds=1.0,
+        calls=calls,
+        delays=delays,
+        backoff=lambda attempt: 1.0,
+    )
+    try:
+        provider.generate_structured("hello", prompt=prompt)
+    finally:
+        provider.close()
+    assert len(calls) == 3
+    assert delays == [1.0]
+
+
+def test_retry_after_cannot_make_permanent_failure_retryable(prompt):
+    calls = []
+    provider = _provider(
+        [httpx.Response(401, headers={"Retry-After": "3"})], calls=calls
+    )
+    try:
+        with pytest.raises(RealProviderHTTPError):
+            provider.generate_structured("hello", prompt=prompt)
+    finally:
+        provider.close()
+    assert len(calls) == 1
+
+
+def test_response_headers_remain_private(prompt, observability_tracer, observability_exporter):
+    secrets = [
+        "Bearer-secret",
+        "session-secret",
+        "secret-value",
+        "https://internal.example",
+    ]
+    provider = _provider(
+        [
+            httpx.Response(
+                429,
+                headers={
+                    "Authorization": secrets[0],
+                    "Cookie": secrets[1],
+                    "X-Internal-Token": secrets[2],
+                    "X-Debug-URL": secrets[3],
+                    "Retry-After": "3",
+                },
+            ),
+            httpx.Response(429),
+        ],
+        max_attempts=2,
+        tracer=observability_tracer,
+    )
+    try:
+        with pytest.raises(RealProviderHTTPError) as captured:
+            provider.generate_structured(RAW_PROMPT, prompt=prompt)
+    finally:
+        provider.close()
+    visible = json.dumps(
+        {
+            "exception": str(captured.value),
+            "failure": captured.value.failure.safe_dict(),
+            "spans": [
+                span.model_dump(mode="json") for span in observability_exporter.spans
+            ],
+        },
+        sort_keys=True,
+    )
+    assert all(secret not in visible for secret in secrets)
+
+
+def test_http_retry_exhaustion_crosses_traceback_privacy_boundary(prompt):
+    endpoint = "https://llm.example.test/private/provider/path"
+    raw_retry_after = "retry-header-secret"
+    response_secrets = ["cookie-secret", "header-secret"]
+    calls = []
+    provider = OptionalRealLLMProvider(
+        settings=RealLLMProviderSettings(
+            enabled=True,
+            base_url=endpoint,
+            model="airline-model-v1",
+            max_attempts=2,
+            max_retry_delay_seconds=5.0,
+        ),
+        api_key=API_KEY,
+        transport=httpx.MockTransport(
+            _scripted_handler(
+                [
+                    httpx.Response(429, headers={"Retry-After": raw_retry_after}),
+                    httpx.Response(
+                        429,
+                        headers={
+                            "Cookie": response_secrets[0],
+                            "X-Internal-Token": response_secrets[1],
+                        },
+                    ),
+                ],
+                calls,
+            )
+        ),
+        sleeper=lambda delay: None,
+    )
+    raw_context = "private retry context"
+    try:
+        with pytest.raises(RealProviderHTTPError) as captured:
+            provider.generate_structured(
+                RAW_PROMPT, prompt=prompt, context=raw_context
+            )
+    finally:
+        provider.close()
+    _assert_controlled_exception_is_private(
+        captured.value,
+        [API_KEY, endpoint, RAW_PROMPT, raw_context, raw_retry_after, *response_secrets],
+    )
+    assert captured.value.failure.category == FailureCategory.RATE_LIMIT
+
+
+@pytest.mark.parametrize(
+    ("response", "category"),
+    [
+        (
+            httpx.Response(
+                200,
+                content=b"private malformed provider envelope",
+                headers={"Cookie": "response-cookie-secret"},
+            ),
+            FailureCategory.PROVIDER,
+        ),
+        (
+            httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": '{"private":"contract-secret"}'}}
+                    ]
+                },
+                headers={"X-Internal-Token": "response-header-secret"},
+            ),
+            FailureCategory.CONTRACT,
+        ),
+    ],
+    ids=["provider-envelope", "domain-contract"],
+)
+def test_response_failures_cross_traceback_privacy_boundary(
+    response, category, prompt
+):
+    endpoint = "https://llm.example.test/private/provider/path"
+    provider = OptionalRealLLMProvider(
+        settings=RealLLMProviderSettings(
+            enabled=True,
+            base_url=endpoint,
+            model="airline-model-v1",
+            max_attempts=1,
+            max_retry_delay_seconds=5.0,
+        ),
+        api_key=API_KEY,
+        transport=httpx.MockTransport(lambda request: response),
+        sleeper=lambda delay: None,
+    )
+    raw_context = "private response context"
+    try:
+        with pytest.raises(RealProviderResponseError) as captured:
+            provider.generate_structured(
+                RAW_PROMPT, prompt=prompt, context=raw_context
+            )
+    finally:
+        provider.close()
+    _assert_controlled_exception_is_private(
+        captured.value,
+        [
+            API_KEY,
+            endpoint,
+            RAW_PROMPT,
+            raw_context,
+            "private malformed provider envelope",
+            "response-cookie-secret",
+            "contract-secret",
+            "response-header-secret",
+        ],
+    )
+    assert captured.value.failure.category == category
 
 
 def test_max_attempts_one_performs_no_retry(prompt):
