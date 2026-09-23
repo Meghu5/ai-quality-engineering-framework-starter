@@ -19,6 +19,7 @@ from ai_quality.models import (
     SafetyResult,
 )
 from ai_quality.prompt_registry import Prompt
+from ai_quality.privacy import safe_model_label
 from ai_quality.provider_config import RealLLMProviderSettings
 from ai_quality.provider_resilience import (
     ProviderFailureMetadata,
@@ -364,7 +365,9 @@ class OptionalRealLLMProvider(LLMProvider):
     ) -> AirlineAssistantResponse:
         attributes = {
             "provider_name": "http-json",
-            "model_name": self.settings.model or "unconfigured",
+            "model_name": safe_model_label(
+                self.settings.model or "unconfigured"
+            ).value,
             "operation": "generate_structured",
             "prompt_length": len(user_input),
             "timeout_seconds": self.settings.timeout_seconds,

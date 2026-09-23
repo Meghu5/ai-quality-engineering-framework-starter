@@ -15,6 +15,17 @@ def _enabled(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _strict_boolean(value: str | None, *, name: str, default: bool) -> bool:
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise ValueError(f"{name} must be either true or false")
+
+
 @dataclass(frozen=True)
 class RealLLMProviderSettings:
     """Non-secret configuration for the optional HTTP LLM provider."""
@@ -25,6 +36,7 @@ class RealLLMProviderSettings:
     timeout_seconds: float = DEFAULT_REAL_PROVIDER_TIMEOUT_SECONDS
     max_attempts: int = DEFAULT_REAL_PROVIDER_MAX_ATTEMPTS
     require_structured_output: bool = True
+    required: bool = False
 
     @classmethod
     def from_env(
@@ -60,11 +72,18 @@ class RealLLMProviderSettings:
             require_structured_output=_enabled(
                 env.get("AI_REAL_PROVIDER_REQUIRE_STRUCTURED_OUTPUT", "true")
             ),
+            required=_strict_boolean(
+                env.get("AI_REAL_PROVIDER_REQUIRED"),
+                name="AI_REAL_PROVIDER_REQUIRED",
+                default=False,
+            ),
         )
         settings.validate()
         return settings
 
     def validate(self, *, api_key_present: bool | None = None) -> None:
+        if not isinstance(self.required, bool):
+            raise ValueError("AI_REAL_PROVIDER_REQUIRED must be a boolean")
         if not 0 < self.timeout_seconds <= MAX_REAL_PROVIDER_TIMEOUT_SECONDS:
             raise ValueError(
                 "AI_REAL_PROVIDER_TIMEOUT_SECONDS must be greater than zero "

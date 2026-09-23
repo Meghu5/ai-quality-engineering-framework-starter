@@ -48,6 +48,7 @@ def _settings(**overrides) -> RealLLMProviderSettings:
         "timeout_seconds": 10.0,
         "max_attempts": 3,
         "require_structured_output": True,
+        "required": False,
     }
     values.update(overrides)
     return RealLLMProviderSettings(**values)
@@ -118,6 +119,7 @@ def test_enabled_provider_accepts_valid_configuration():
             "timeout_seconds": 10.0,
             "max_attempts": 3,
             "require_structured_output": True,
+            "required": False,
         }
     finally:
         provider.close()
@@ -150,6 +152,7 @@ def test_environment_configuration_does_not_retain_api_key():
         "AI_REAL_PROVIDER_TIMEOUT_SECONDS": "15",
         "AI_REAL_PROVIDER_MAX_ATTEMPTS": "3",
         "AI_REAL_PROVIDER_REQUIRE_STRUCTURED_OUTPUT": "true",
+        "AI_REAL_PROVIDER_REQUIRED": "false",
     }
     provider = OptionalRealLLMProvider(
         environment=environment,
@@ -161,6 +164,23 @@ def test_environment_configuration_does_not_retain_api_key():
         assert "api_key" not in serialized.lower()
     finally:
         provider.close()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("true", True), ("false", False)],
+)
+def test_required_environment_flag_accepts_explicit_booleans(value, expected):
+    settings = RealLLMProviderSettings.from_env(
+        {"AI_REAL_PROVIDER_REQUIRED": value}
+    )
+    assert settings.required is expected
+
+
+@pytest.mark.parametrize("value", ["tru", "yesplease", "enabled", "", "1", "0"])
+def test_required_environment_flag_rejects_malformed_values(value):
+    with pytest.raises(ValueError, match="AI_REAL_PROVIDER_REQUIRED"):
+        RealLLMProviderSettings.from_env({"AI_REAL_PROVIDER_REQUIRED": value})
 
 
 def test_successful_mocked_provider_response(prompt):
