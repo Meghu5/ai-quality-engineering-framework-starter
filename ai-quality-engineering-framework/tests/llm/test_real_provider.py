@@ -46,6 +46,7 @@ def _settings(**overrides) -> RealLLMProviderSettings:
         "base_url": "https://llm.example.test/v1/chat/completions",
         "model": "airline-model-v1",
         "timeout_seconds": 10.0,
+        "max_attempts": 3,
         "require_structured_output": True,
     }
     values.update(overrides)
@@ -87,6 +88,7 @@ def _provider(handler, *, tracer: TracingFacade | None = None):
         api_key=API_KEY,
         transport=httpx.MockTransport(handler),
         tracer=tracer,
+        sleeper=lambda delay: None,
     )
 
 
@@ -114,6 +116,7 @@ def test_enabled_provider_accepts_valid_configuration():
             "base_url": "https://llm.example.test/v1/chat/completions",
             "model": "airline-model-v1",
             "timeout_seconds": 10.0,
+            "max_attempts": 3,
             "require_structured_output": True,
         }
     finally:
@@ -145,6 +148,7 @@ def test_environment_configuration_does_not_retain_api_key():
         "AI_REAL_PROVIDER_API_KEY": API_KEY,
         "AI_REAL_PROVIDER_MODEL": "airline-model-v1",
         "AI_REAL_PROVIDER_TIMEOUT_SECONDS": "15",
+        "AI_REAL_PROVIDER_MAX_ATTEMPTS": "3",
         "AI_REAL_PROVIDER_REQUIRE_STRUCTURED_OUTPUT": "true",
     }
     provider = OptionalRealLLMProvider(

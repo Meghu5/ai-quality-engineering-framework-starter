@@ -5,6 +5,7 @@ import re
 import json
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -19,6 +20,12 @@ from ai_quality.models import (
 )
 from ai_quality.prompt_registry import Prompt
 from ai_quality.provider_config import RealLLMProviderSettings
+from ai_quality.provider_resilience import (
+    ProviderFailureMetadata,
+    classify_http_failure,
+    classify_transport_failure,
+    exponential_backoff,
+)
 from observability.context import get_context
 from observability.models import FailureCategory
 from observability.tracing import TracingFacade, create_tracing_facade
@@ -261,19 +268,49 @@ class DeterministicLLMProvider(LLMProvider):
 class RealProviderError(RuntimeError):
     """Safe base exception for provider-boundary failures."""
 
+    def __init__(
+        self, message: str, *, failure: ProviderFailureMetadata | None = None
+    ) -> None:
+        self.failure = failure
+        super().__init__(message)
+
 
 class RealProviderDisabledError(RealProviderError):
     pass
 
 
 class RealProviderHTTPError(RealProviderError):
-    def __init__(self, status_code: int) -> None:
+    def __init__(
+        self, status_code: int, *, failure: ProviderFailureMetadata | None = None
+    ) -> None:
         self.status_code = status_code
-        super().__init__(f"Real LLM provider returned HTTP {status_code}")
+        super().__init__(
+            f"Real LLM provider returned HTTP {status_code}", failure=failure
+        )
+
+
+class RealProviderTransportError(RealProviderError):
+    def __init__(self, *, failure: ProviderFailureMetadata) -> None:
+        super().__init__(
+            f"Real LLM provider transport failure ({failure.category.value})",
+            failure=failure,
+        )
 
 
 class RealProviderResponseError(RealProviderError):
     pass
+
+
+class _TransportExceptionPrivacyBoundary:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        if isinstance(exc, RealProviderTransportError):
+            exc.__traceback__ = None
+            exc.__cause__ = None
+            exc.__context__ = None
+        return False
 
 
 class OptionalRealLLMProvider(LLMProvider):
@@ -288,6 +325,8 @@ class OptionalRealLLMProvider(LLMProvider):
         client: httpx.Client | None = None,
         transport: httpx.BaseTransport | None = None,
         tracer: TracingFacade | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
+        backoff: Callable[[int], float] = exponential_backoff,
     ) -> None:
         if client is not None and transport is not None:
             raise ValueError("client and transport cannot both be provided")
@@ -299,6 +338,8 @@ class OptionalRealLLMProvider(LLMProvider):
         self.settings.validate(api_key_present=bool(resolved_api_key))
         self._api_key = resolved_api_key
         self.tracer = tracer or create_tracing_facade()
+        self._sleeper = sleeper
+        self._backoff = backoff
         self._owns_client = client is None
         self._client = client or httpx.Client(
             timeout=self.settings.timeout_seconds,
@@ -328,7 +369,7 @@ class OptionalRealLLMProvider(LLMProvider):
             "prompt_length": len(user_input),
             "timeout_seconds": self.settings.timeout_seconds,
         }
-        with self.tracer.start_span(
+        with _TransportExceptionPrivacyBoundary(), self.tracer.start_span(
             "llm.generation", operation_type="llm", attributes=attributes
         ) as span:
             if not self.settings.enabled:
@@ -337,31 +378,69 @@ class OptionalRealLLMProvider(LLMProvider):
                 raise error
 
             started_at = time.perf_counter()
-            try:
-                response = self._client.post(
-                    self.settings.base_url,
-                    headers=self._headers(),
-                    json=self._request_payload(user_input, prompt, context),
+            response: httpx.Response | None = None
+            completed_attempt = 0
+            for attempt in range(1, self.settings.max_attempts + 1):
+                completed_attempt = attempt
+                transport_error: RealProviderTransportError | None = None
+                try:
+                    response = self._client.post(
+                        self.settings.base_url,
+                        headers=self._headers(),
+                        json=self._request_payload(user_input, prompt, context),
+                    )
+                except httpx.RequestError as exc:
+                    span.set_attribute("status_code", None)
+                    failure = classify_transport_failure(
+                        exc,
+                        attempt=attempt,
+                        max_attempts=self.settings.max_attempts,
+                    )
+                    if failure.retryable and attempt < self.settings.max_attempts:
+                        self._sleep_before_retry(attempt)
+                        continue
+                    transport_error = RealProviderTransportError(failure=failure)
+
+                if transport_error is not None:
+                    span.record_exception(
+                        transport_error, transport_error.failure.category
+                    )
+                    raise transport_error
+
+                span.set_attribute("status_code", response.status_code)
+                if not response.is_error:
+                    break
+                failure = classify_http_failure(
+                    response.status_code,
+                    attempt=attempt,
+                    max_attempts=self.settings.max_attempts,
                 )
-            except httpx.TimeoutException as exc:
-                span.record_exception(exc, FailureCategory.TIMEOUT)
-                raise
-            except httpx.RequestError as exc:
-                span.record_exception(exc, FailureCategory.NETWORK)
-                raise
+                if failure.retryable and attempt < self.settings.max_attempts:
+                    self._sleep_before_retry(attempt)
+                    continue
+                error = RealProviderHTTPError(
+                    response.status_code, failure=failure
+                )
+                span.record_exception(error, failure.category)
+                raise error
 
             span.set_attribute("latency_ms", (time.perf_counter() - started_at) * 1000)
-            span.set_attribute("status_code", response.status_code)
-            if response.is_error:
-                error = RealProviderHTTPError(response.status_code)
-                span.record_exception(error, _http_failure_category(response.status_code))
-                raise error
+            if response is None:
+                raise RuntimeError("Provider request completed without a response")
 
             try:
                 payload = response.json()
                 content, token_count = _parse_provider_envelope(payload)
             except (json.JSONDecodeError, TypeError, KeyError, IndexError, ValueError):
-                error = RealProviderResponseError("Provider response envelope is malformed")
+                failure = ProviderFailureMetadata(
+                    category=FailureCategory.PROVIDER,
+                    retryable=False,
+                    attempt=completed_attempt,
+                    max_attempts=self.settings.max_attempts,
+                )
+                error = RealProviderResponseError(
+                    "Provider response envelope is malformed", failure=failure
+                )
                 span.record_exception(error, FailureCategory.PROVIDER)
                 raise error from None
 
@@ -372,12 +451,25 @@ class OptionalRealLLMProvider(LLMProvider):
                 structured = json.loads(content) if isinstance(content, str) else content
                 result = AirlineAssistantResponse.model_validate(structured)
             except (json.JSONDecodeError, ValidationError, TypeError):
+                failure = ProviderFailureMetadata(
+                    category=FailureCategory.CONTRACT,
+                    retryable=False,
+                    attempt=completed_attempt,
+                    max_attempts=self.settings.max_attempts,
+                )
                 error = RealProviderResponseError(
-                    "Provider structured response failed contract validation"
+                    "Provider structured response failed contract validation",
+                    failure=failure,
                 )
                 span.record_exception(error, FailureCategory.CONTRACT)
                 raise error from None
             return result
+
+    def _sleep_before_retry(self, attempt: int) -> None:
+        delay = self._backoff(attempt)
+        if delay < 0:
+            raise ValueError("Retry backoff must not be negative")
+        self._sleeper(delay)
 
     def close(self) -> None:
         if self._owns_client:
@@ -425,13 +517,3 @@ def _parse_provider_envelope(payload: Any) -> tuple[str | dict[str, Any], int | 
     if token_count is not None and (not isinstance(token_count, int) or token_count < 0):
         token_count = None
     return content, token_count
-
-
-def _http_failure_category(status_code: int) -> FailureCategory:
-    if status_code == 401:
-        return FailureCategory.AUTHENTICATION
-    if status_code == 403:
-        return FailureCategory.AUTHORIZATION
-    if status_code == 429:
-        return FailureCategory.RATE_LIMIT
-    return FailureCategory.PROVIDER
