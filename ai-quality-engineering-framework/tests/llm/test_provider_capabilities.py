@@ -13,6 +13,7 @@ from ai_quality.provider_capabilities import (
     ProviderCapabilities,
     ProviderCapabilityEvidence,
     ProviderCapabilityRequirement,
+    SchemaCompatibilityEvidence,
     assess_provider_capabilities,
 )
 from ai_quality.provider_conformance import (
@@ -105,8 +106,8 @@ class _UnknownProvider(LLMProvider):
 
 
 class _DeclaredProvider(_UnknownProvider):
-    def __init__(self, declaration) -> None:
-        super().__init__()
+    def __init__(self, declaration, *, preflight_error=None) -> None:
+        super().__init__(preflight_error=preflight_error)
         self.declaration = declaration
 
     def get_capabilities(self):
@@ -151,6 +152,23 @@ def test_capability_contracts_are_strict_and_immutable():
     with pytest.raises(ValidationError):
         evidence.status = "unknown"
 
+    compatibility = SchemaCompatibilityEvidence(
+        declaration="compatible",
+        empirical="verified",
+        verification_basis="both",
+        golden_contract_valid=True,
+    )
+    assert compatibility.expected_schema_id == AIRLINE_RESPONSE_SCHEMA_ID
+    assert compatibility.expected_schema_version == AIRLINE_RESPONSE_SCHEMA_VERSION
+    with pytest.raises(ValidationError):
+        compatibility.empirical = "failed"
+    with pytest.raises(ValidationError):
+        SchemaCompatibilityEvidence(
+            declaration="unknown",
+            empirical="verified",
+            verification_basis="both",
+        )
+
 
 @pytest.mark.parametrize(
     "overrides",
@@ -171,6 +189,31 @@ def test_declared_supported_capability_is_recognized():
         _DeclaredProvider(_capabilities()), ProviderCapabilityRequirement()
     )
     assert evidence.status == "supported"
+
+
+def test_declared_compatible_and_verified_preserves_both_sources():
+    provider = _DeclaredProvider(_capabilities())
+    report = _runner(provider, _Evaluator()).run(
+        [_case()], prompt=Prompt(name="p", version="v1", purpose="p", text="p")
+    )
+    assert report.capability.status == "supported"
+    assert report.schema_compatibility.declaration == "compatible"
+    assert report.schema_compatibility.empirical == "verified"
+    assert report.schema_compatibility.verification_basis == "both"
+    assert report.schema_compatibility.golden_contract_valid is True
+    assert len(provider.calls) == 2
+
+
+def test_explicit_unknown_declaration_is_empirically_verified():
+    provider = _DeclaredProvider(None)
+    report = _runner(provider, _Evaluator()).run(
+        [_case()], prompt=Prompt(name="p", version="v1", purpose="p", text="p")
+    )
+    assert report.capability.status == "unknown"
+    assert report.schema_compatibility.declaration == "unknown"
+    assert report.schema_compatibility.empirical == "verified"
+    assert report.schema_compatibility.verification_basis == "empirical"
+    assert report.schema_compatibility.golden_contract_valid is True
 
 
 def test_provider_without_optional_protocol_is_unknown():
@@ -195,6 +238,9 @@ def test_declared_unsupported_short_circuits_all_execution(required):
     assert report.completed_case_count == 0
     assert report.quality_report is None
     assert report.policy_passed is False
+    assert report.schema_compatibility.declaration == "incompatible"
+    assert report.schema_compatibility.empirical == "not_run"
+    assert report.schema_compatibility.verification_basis is None
     assert provider.calls == []
     assert evaluator.calls == 0
 
@@ -218,6 +264,8 @@ def test_declared_schema_mismatch_short_circuits_all_execution():
     assert report.completed_case_count == 0
     assert report.quality_report is None
     assert report.policy_passed is False
+    assert report.schema_compatibility.declaration == "incompatible"
+    assert report.schema_compatibility.empirical == "not_run"
     assert provider.calls == []
     assert evaluator.calls == 0
 
@@ -310,6 +358,66 @@ def test_hostile_schema_identifiers_are_absent_from_reports_and_spans(
     assert evaluator.calls == 0
 
 
+@pytest.mark.parametrize(
+    "hostile_version",
+    [
+        "2.0",
+        "../../secret",
+        "https://attacker.example",
+        "Authorization: Bearer private-token",
+        "x" * 4096,
+        '{"schema_version":"1.0","extra":"private"}',
+        "1.0\nAuthorization: Bearer private-token",
+    ],
+    ids=[
+        "future-version",
+        "path",
+        "url",
+        "authorization",
+        "oversized",
+        "json-looking",
+        "control-character",
+    ],
+)
+def test_hostile_schema_versions_are_normalized_without_retention(hostile_version):
+    provider = _DeclaredProvider(
+        {
+            "structured_output": True,
+            "response_schema_id": AIRLINE_RESPONSE_SCHEMA_ID,
+            "response_schema_versions": (hostile_version,),
+        }
+    )
+    report = _runner(provider, _Evaluator()).run(
+        [_case()], prompt=Prompt(name="p", version="v1", purpose="p", text="p")
+    )
+    serialized = serialize_provider_report(report)
+    assert report.outcome == "schema_mismatch"
+    assert report.schema_compatibility.declaration == "incompatible"
+    assert report.schema_compatibility.empirical == "not_run"
+    assert hostile_version not in serialized
+    assert report.schema_compatibility.expected_schema_version == "1.0"
+
+
+def test_capability_field_injection_is_invalid_and_not_persisted():
+    hostile = "private-injected-metadata"
+    provider = _DeclaredProvider(
+        {
+            "structured_output": True,
+            "response_schema_id": AIRLINE_RESPONSE_SCHEMA_ID,
+            "response_schema_versions": (AIRLINE_RESPONSE_SCHEMA_VERSION,),
+            "arbitrary_metadata": hostile,
+        }
+    )
+    report = _runner(provider, _Evaluator()).run(
+        [_case()], prompt=Prompt(name="p", version="v1", purpose="p", text="p")
+    )
+    serialized = serialize_provider_report(report)
+    assert report.outcome == "capability_failed"
+    assert report.reason_code == "provider_capability_invalid"
+    assert report.schema_compatibility.declaration == "invalid"
+    assert hostile not in serialized
+
+
 def test_malformed_protocol_declaration_fails_closed():
     evaluator = _Evaluator()
     provider = _DeclaredProvider({"structured_output": "yes"})
@@ -319,6 +427,8 @@ def test_malformed_protocol_declaration_fails_closed():
     assert report.outcome == "capability_failed"
     assert report.reason_code == "provider_capability_invalid"
     assert report.capability.status == "unknown"
+    assert report.schema_compatibility.declaration == "invalid"
+    assert report.schema_compatibility.empirical == "not_run"
     assert provider.calls == []
 
 
@@ -330,7 +440,11 @@ def test_unknown_declaration_runs_one_preflight_before_golden_cases():
         [case], prompt=Prompt(name="golden", version="v1", purpose="p", text="golden")
     )
     assert report.outcome == "passed"
-    assert report.capability.status == "supported"
+    assert report.capability.status == "unknown"
+    assert report.schema_compatibility.declaration == "absent"
+    assert report.schema_compatibility.empirical == "verified"
+    assert report.schema_compatibility.verification_basis == "empirical"
+    assert report.schema_compatibility.golden_contract_valid is True
     assert evaluator.calls == 1
     assert len(provider.calls) == 2
     preflight, golden = provider.calls
@@ -363,9 +477,37 @@ def test_schema_invalid_preflight_prevents_golden_and_evaluation():
         [_case()], prompt=Prompt(name="p", version="v1", purpose="p", text="p")
     )
     assert report.outcome == "schema_mismatch"
-    assert report.capability.status == "schema_mismatch"
+    assert report.capability.status == "unknown"
+    assert report.schema_compatibility.declaration == "absent"
+    assert report.schema_compatibility.empirical == "failed"
     assert len(provider.calls) == 1
     assert evaluator.calls == 0
+
+
+def test_declared_compatible_preflight_failure_preserves_provenance():
+    failure = ProviderFailureMetadata(
+        category=FailureCategory.CONTRACT,
+        retryable=False,
+        attempt=1,
+        max_attempts=1,
+    )
+    provider = _DeclaredProvider(
+        _capabilities(),
+        preflight_error=RealProviderResponseError(
+            "private provider detail", failure=failure
+        ),
+    )
+    report = _runner(provider, _Evaluator()).run(
+        [_case()], prompt=Prompt(name="p", version="v1", purpose="p", text="p")
+    )
+    serialized = serialize_provider_report(report)
+    assert report.outcome == "schema_mismatch"
+    assert report.capability.status == "supported"
+    assert report.schema_compatibility.declaration == "compatible"
+    assert report.schema_compatibility.empirical == "failed"
+    assert report.schema_compatibility.verification_basis is None
+    assert report.schema_compatibility.golden_contract_valid is False
+    assert "private provider detail" not in serialized
 
 
 def test_capability_evidence_is_safe_and_deterministic():
@@ -410,6 +552,10 @@ def test_report_rejects_supported_outcome_with_mismatched_capability():
                 structured_output_supported=True,
                 failure_category=FailureCategory.CONTRACT,
                 reason_code="provider_schema_mismatch",
+            ),
+            schema_compatibility=SchemaCompatibilityEvidence(
+                declaration="incompatible",
+                empirical="not_run",
             ),
             quality_report=_Evaluator().evaluate([_case()], [_response()]),
             policy_passed=True,

@@ -14,6 +14,8 @@ from ai_quality.models import AirlineAssistantResponse, GoldenCase, QualityRepor
 from ai_quality.privacy import safe_case_id, safe_model_label
 from ai_quality.prompt_registry import Prompt
 from ai_quality.provider_config import RealLLMProviderSettings
+from ai_quality.provider_capabilities import SchemaCompatibilityEvidence
+from ai_quality.provider_resilience import ProviderFailureMetadata
 from ai_quality.provider_conformance import (
     ProviderConformanceRunner,
     ProviderConformanceReport,
@@ -25,7 +27,11 @@ from ai_quality.provider_conformance import (
     serialize_provider_report,
     write_provider_phase10_report,
 )
-from ai_quality.providers import LLMProvider, OptionalRealLLMProvider
+from ai_quality.providers import (
+    LLMProvider,
+    OptionalRealLLMProvider,
+    RealProviderResponseError,
+)
 from observability.lifecycle import (
     ArtifactType,
     create_bundle_from_existing_reports,
@@ -149,6 +155,61 @@ class RecordingEvaluator:
         return self.report
 
 
+class RuntimeValueProvider(LLMProvider):
+    def __init__(self, *, preflight_value, golden_values):
+        self.preflight_value = preflight_value
+        self.golden_values = iter(golden_values)
+        self.calls = []
+
+    def health_check(self) -> bool:
+        return True
+
+    def generate(self, user_input, *, prompt, context=None):
+        return "unused"
+
+    def generate_structured(self, user_input, *, prompt, case=None, context=None):
+        self.calls.append(case.id if case is not None else "preflight")
+        return self.preflight_value if case is None else next(self.golden_values)
+
+
+class ValidatedResponseEvaluator:
+    def __init__(self, *, passed=True):
+        self.passed = passed
+        self.calls = []
+
+    def evaluate(self, cases, responses):
+        self.calls.append((list(cases), list(responses)))
+        count = len(cases)
+        score = 1.0 if self.passed else 0.0
+        return QualityReport(
+            total_cases=count,
+            passed_cases=count if self.passed else 0,
+            failed_cases=0 if self.passed else count,
+            intent_accuracy=score,
+            entity_accuracy=score,
+            structured_output_validity=1.0,
+            relevance_score=score,
+            groundedness_score=score,
+            safety_pass_rate=score,
+            pii_protection_rate=score,
+            prompt_injection_pass_rate=score,
+            hallucination_pass_rate=score,
+            overall_passed=self.passed,
+        )
+
+
+def _runtime_cases() -> list[GoldenCase]:
+    return [
+        GoldenCase(
+            id=f"runtime-{index}",
+            category="flight_search",
+            user_input="Find a flight",
+            expected_intent="flight_search",
+        )
+        for index in range(3)
+    ]
+
+
 def _runner(provider, *, required=False, evaluator=None):
     return ProviderConformanceRunner(
         provider=provider,
@@ -223,6 +284,10 @@ def test_all_cases_succeed_and_quality_passes(cases, prompt):
     assert provider.case_ids == ["case-002", "case-001"]
     assert len(evaluator.calls) == 1
     assert report.policy_passed is True
+    assert report.schema_compatibility.declaration == "absent"
+    assert report.schema_compatibility.empirical == "verified"
+    assert report.schema_compatibility.verification_basis == "empirical"
+    assert report.schema_compatibility.golden_contract_valid is True
     assert conformance_exit_code(report) == 0
 
 
@@ -239,6 +304,8 @@ def test_all_cases_succeed_and_quality_fails(cases, prompt):
     assert report.failure is None
     assert report.completed_case_count == report.case_count
     assert report.policy_passed is False
+    assert report.schema_compatibility.empirical == "verified"
+    assert report.schema_compatibility.golden_contract_valid is True
     assert conformance_exit_code(report) == 1
 
 
@@ -292,6 +359,8 @@ def test_real_provider_failures_have_safe_states(
     assert report.completed_case_count == 0
     assert report.case_count == len(cases)
     assert report.policy_passed is False
+    assert report.schema_compatibility.empirical == "failed"
+    assert report.schema_compatibility.golden_contract_valid is False
     assert conformance_exit_code(report) == 1
 
 
@@ -322,6 +391,8 @@ def test_generic_failure_is_normalized_without_exception_text(cases, prompt):
     assert report.quality_report is None
     assert evaluator.calls == []
     assert "secret arbitrary exception" not in serialized
+    assert report.schema_compatibility.empirical == "verified"
+    assert report.schema_compatibility.golden_contract_valid is False
 
 
 def test_partial_responses_are_never_evaluated(cases, prompt):
@@ -331,6 +402,204 @@ def test_partial_responses_are_never_evaluated(cases, prompt):
     assert report.completed_case_count == 1
     assert report.quality_report is None
     assert evaluator.calls == []
+    assert report.schema_compatibility.empirical == "verified"
+    assert report.schema_compatibility.golden_contract_valid is False
+
+
+def test_golden_schema_mismatch_preserves_verified_preflight(cases, prompt):
+    failure = ProviderFailureMetadata(
+        category=FailureCategory.CONTRACT,
+        retryable=False,
+        attempt=1,
+        max_attempts=1,
+    )
+    provider = StaticProvider(
+        [
+            RealProviderResponseError(
+                "private malformed response", failure=failure
+            )
+        ]
+    )
+    report = _runner(provider).run(cases, prompt=prompt)
+    serialized = serialize_provider_report(report)
+    assert report.outcome == "schema_mismatch"
+    assert report.reason_code == "provider_schema_mismatch"
+    assert report.schema_compatibility.declaration == "absent"
+    assert report.schema_compatibility.empirical == "verified"
+    assert report.schema_compatibility.verification_basis == "empirical"
+    assert report.schema_compatibility.golden_contract_valid is False
+    assert "private malformed response" not in serialized
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    [
+        pytest.param({}, id="empty-dict"),
+        pytest.param({"intent": "missing-fields"}, id="invalid-dict"),
+        pytest.param([], id="list"),
+        pytest.param("invalid", id="string"),
+        pytest.param(object(), id="object"),
+    ],
+)
+def test_preflight_rejects_invalid_returned_values_without_evaluation(
+    invalid_value, prompt
+):
+    cases = _runtime_cases()
+    evaluator = ValidatedResponseEvaluator()
+    provider = RuntimeValueProvider(
+        preflight_value=invalid_value,
+        golden_values=[_assistant_response()] * len(cases),
+    )
+
+    report = _runner(provider, evaluator=evaluator).run(cases, prompt=prompt)
+
+    assert report.execution_status == "failed"
+    assert report.outcome == "schema_mismatch"
+    assert report.failure_category == FailureCategory.CONTRACT
+    assert report.reason_code == "provider_schema_mismatch"
+    assert report.completed_case_count == 0
+    assert report.case_count == len(cases)
+    assert report.quality_report is None
+    assert report.policy_passed is False
+    assert report.schema_compatibility.declaration == "absent"
+    assert report.schema_compatibility.empirical == "failed"
+    assert report.schema_compatibility.verification_basis is None
+    assert report.schema_compatibility.golden_contract_valid is False
+    assert provider.calls == ["preflight"]
+    assert evaluator.calls == []
+
+
+@pytest.mark.parametrize("invalid_position", [0, 1, 2])
+def test_golden_rejects_invalid_returned_value_and_stops_remaining_cases(
+    invalid_position, prompt
+):
+    cases = _runtime_cases()
+    values = [_assistant_response() for _ in cases]
+    values[invalid_position] = {"intent": "missing-fields"}
+    evaluator = ValidatedResponseEvaluator()
+    provider = RuntimeValueProvider(
+        preflight_value=_assistant_response(),
+        golden_values=values,
+    )
+
+    report = _runner(provider, evaluator=evaluator).run(cases, prompt=prompt)
+
+    assert report.execution_status == "failed"
+    assert report.outcome == "schema_mismatch"
+    assert report.failure_category == FailureCategory.CONTRACT
+    assert report.reason_code == "provider_schema_mismatch"
+    assert report.completed_case_count == invalid_position
+    assert report.case_count == len(cases)
+    assert report.quality_report is None
+    assert report.policy_passed is False
+    assert report.schema_compatibility.declaration == "absent"
+    assert report.schema_compatibility.empirical == "verified"
+    assert report.schema_compatibility.verification_basis == "empirical"
+    assert report.schema_compatibility.golden_contract_valid is False
+    assert provider.calls == ["preflight"] + [
+        case.id for case in cases[: invalid_position + 1]
+    ]
+    assert evaluator.calls == []
+
+
+@pytest.mark.parametrize("quality_passed", [True, False])
+def test_valid_returned_dicts_are_normalized_before_quality_evaluation(
+    quality_passed, prompt
+):
+    cases = _runtime_cases()
+    response_dict = _assistant_response().model_dump(mode="json")
+    evaluator = ValidatedResponseEvaluator(passed=quality_passed)
+    provider = RuntimeValueProvider(
+        preflight_value=response_dict,
+        golden_values=[response_dict for _ in cases],
+    )
+
+    report = _runner(provider, evaluator=evaluator).run(cases, prompt=prompt)
+
+    assert report.execution_status == "executed"
+    assert report.outcome == ("passed" if quality_passed else "quality_failed")
+    assert report.reason_code == (None if quality_passed else "quality_gate_failed")
+    assert report.completed_case_count == len(cases)
+    assert report.quality_report is not None
+    assert report.policy_passed is quality_passed
+    assert report.schema_compatibility.empirical == "verified"
+    assert report.schema_compatibility.golden_contract_valid is True
+    assert len(evaluator.calls) == 1
+    assert all(
+        isinstance(response, AirlineAssistantResponse)
+        for response in evaluator.calls[0][1]
+    )
+
+
+@pytest.mark.parametrize("failure_stage", ["preflight", "golden"])
+def test_invalid_returned_payload_is_absent_from_reports_traces_and_logs(
+    failure_stage, prompt, caplog
+):
+    secrets = [
+        "sk-runtime-secret",
+        "Bearer runtime-authorization",
+        "https://user:password@provider.example/private?api_key=secret",
+        "C:\\private\\provider\\credentials.json",
+        "private.person@example.test",
+        "raw prompt with booking reference ABC123",
+        "raw context with passport P1234567",
+        "transport failure includes private endpoint",
+        "LARGE-" + ("x" * 4096),
+        "deeply-nested-private-value",
+    ]
+    hostile_value = {
+        "api_key": secrets[0],
+        "authorization": secrets[1],
+        "endpoint": secrets[2],
+        "path": secrets[3],
+        "pii": secrets[4],
+        "prompt": secrets[5],
+        "context": secrets[6],
+        "error": secrets[7],
+        "large": secrets[8],
+        "nested": {"items": [{"private": secrets[9]}]},
+    }
+    cases = _runtime_cases()
+    exporter = InMemoryExporter()
+    tracer = TracingFacade(
+        settings=ObservabilitySettings(enabled=True, exporter="memory"),
+        exporter=exporter,
+    )
+    provider = RuntimeValueProvider(
+        preflight_value=(
+            hostile_value if failure_stage == "preflight" else _assistant_response()
+        ),
+        golden_values=(
+            [hostile_value] + [_assistant_response()] * (len(cases) - 1)
+        ),
+    )
+    evaluator = ValidatedResponseEvaluator()
+
+    report = ProviderConformanceRunner(
+        provider=provider,
+        provider_label="test-provider",
+        model_label="test-model",
+        evaluator=evaluator,
+        tracer=tracer,
+    ).run(cases, prompt=prompt)
+    exposed = "\n".join(
+        [
+            serialize_provider_report(report),
+            json.dumps(
+                [span.model_dump(mode="json") for span in exporter.spans],
+                sort_keys=True,
+            ),
+            caplog.text,
+        ]
+    )
+
+    assert report.outcome == "schema_mismatch"
+    assert report.failure_category == FailureCategory.CONTRACT
+    assert report.reason_code == "provider_schema_mismatch"
+    assert report.quality_report is None
+    assert evaluator.calls == []
+    for secret in secrets:
+        assert secret not in exposed
 
 
 def test_serialization_is_deterministic_and_labels_are_sanitized(cases, prompt):
@@ -350,6 +619,7 @@ def test_serialization_is_deterministic_and_labels_are_sanitized(cases, prompt):
     assert first.provider.startswith("opaque-")
     assert first.model.startswith("opaque-")
     assert first.provider != first.model
+    assert first.schema_compatibility == second.schema_compatibility
     assert serialize_provider_report(first) == serialize_provider_report(second)
 
 
@@ -364,6 +634,9 @@ def test_phase10_adapter_preserves_existing_sections(cases, prompt):
     assert adapted.baseline["phase8"] == original.baseline["phase8"]
     assert adapted.baseline["phase9"] == original.baseline["phase9"]
     assert adapted.baseline["provider_conformance"]["outcome"] == "passed"
+    assert adapted.baseline["provider_conformance"]["schema_compatibility"] == (
+        provider_report.schema_compatibility.model_dump(mode="json")
+    )
     assert Phase10Report.model_validate(adapted.model_dump()) == adapted
 
 
@@ -593,10 +866,24 @@ def _report_payload(**overrides):
         "completed_case_count": 0,
         "case_ids": ["case-1"],
         "failure": None,
+        "schema_compatibility": SchemaCompatibilityEvidence(
+            declaration="absent",
+            empirical="not_run",
+        ),
         "quality_report": None,
         "policy_passed": True,
     }
     payload.update(overrides)
+    if "schema_compatibility" not in overrides and payload["outcome"] in {
+        "passed",
+        "quality_failed",
+    }:
+        payload["schema_compatibility"] = SchemaCompatibilityEvidence(
+            declaration="absent",
+            empirical="verified",
+            verification_basis="empirical",
+            golden_contract_valid=True,
+        )
     if "failure" in overrides and "failure_category" not in overrides:
         failure = overrides["failure"]
         payload["failure_category"] = failure.category if failure else None

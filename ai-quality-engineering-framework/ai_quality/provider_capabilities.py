@@ -9,8 +9,13 @@ from observability.models import FailureCategory
 
 AIRLINE_RESPONSE_SCHEMA_ID = "airline-assistant-response"
 AIRLINE_RESPONSE_SCHEMA_VERSION = "1.0"
+AIRLINE_RESPONSE_VALIDATOR_ID = "airline-assistant-response-validator"
+AIRLINE_RESPONSE_VALIDATOR_VERSION = "1.0"
 
 CapabilityStatus = Literal["supported", "unsupported", "unknown", "schema_mismatch"]
+DeclarationState = Literal["compatible", "unknown", "incompatible", "invalid", "absent"]
+EmpiricalState = Literal["verified", "failed", "not_run"]
+VerificationBasis = Literal["declaration", "empirical", "both"]
 CapabilityReasonCode = Literal[
     "provider_capability_unsupported",
     "provider_capability_invalid",
@@ -94,9 +99,54 @@ class ProviderCapabilityEvidence(BaseModel):
         return self
 
 
+class SchemaCompatibilityEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    declaration: DeclarationState
+    empirical: EmpiricalState
+    verification_basis: VerificationBasis | None = None
+    expected_schema_id: Literal["airline-assistant-response"] = (
+        AIRLINE_RESPONSE_SCHEMA_ID
+    )
+    expected_schema_version: Literal["1.0"] = AIRLINE_RESPONSE_SCHEMA_VERSION
+    validator_id: Literal["airline-assistant-response-validator"] = (
+        AIRLINE_RESPONSE_VALIDATOR_ID
+    )
+    validator_version: Literal["1.0"] = AIRLINE_RESPONSE_VALIDATOR_VERSION
+    golden_contract_valid: bool = Field(default=False, strict=True)
+
+    @model_validator(mode="after")
+    def validate_compatibility(self) -> "SchemaCompatibilityEvidence":
+        if self.declaration in {"incompatible", "invalid"}:
+            if self.empirical != "not_run" or self.verification_basis is not None:
+                raise ValueError(
+                    "incompatible or invalid declarations cannot be empirically verified"
+                )
+        elif self.empirical == "verified":
+            expected_basis = (
+                "both" if self.declaration == "compatible" else "empirical"
+            )
+            if self.verification_basis != expected_basis:
+                raise ValueError("verification basis is inconsistent with evidence")
+        elif self.empirical == "failed":
+            if self.verification_basis is not None:
+                raise ValueError("failed empirical verification has no compatibility basis")
+        elif self.empirical == "not_run":
+            expected_basis = (
+                "declaration" if self.declaration == "compatible" else None
+            )
+            if self.verification_basis != expected_basis:
+                raise ValueError("verification basis is inconsistent with evidence")
+        if self.golden_contract_valid and self.empirical != "verified":
+            raise ValueError(
+                "golden contract validity requires empirical verification"
+            )
+        return self
+
+
 @runtime_checkable
 class CapabilityProvider(Protocol):
-    def get_capabilities(self) -> ProviderCapabilities: ...
+    def get_capabilities(self) -> ProviderCapabilities | None: ...
 
 
 def assess_provider_capabilities(
@@ -107,6 +157,8 @@ def assess_provider_capabilities(
         return ProviderCapabilityEvidence(status="unknown")
     try:
         raw_declaration = provider.get_capabilities()
+        if raw_declaration is None:
+            return ProviderCapabilityEvidence(status="unknown")
         declaration = ProviderCapabilities.model_validate(raw_declaration, strict=True)
     except Exception:
         if _is_well_formed_schema_mismatch(locals().get("raw_declaration")):
@@ -170,4 +222,48 @@ def supported_capability_evidence() -> ProviderCapabilityEvidence:
     return ProviderCapabilityEvidence(
         status="supported",
         structured_output_supported=True,
+    )
+
+
+def schema_compatibility_for_declaration(
+    provider: object | None,
+    capability: ProviderCapabilityEvidence | None,
+) -> SchemaCompatibilityEvidence:
+    if capability is None:
+        declaration: DeclarationState = (
+            "unknown" if isinstance(provider, CapabilityProvider) else "absent"
+        )
+    elif capability.status == "supported":
+        declaration = "compatible"
+    elif capability.status in {"unsupported", "schema_mismatch"}:
+        declaration = "incompatible"
+    elif capability.reason_code == "provider_capability_invalid":
+        declaration = "invalid"
+    else:
+        declaration = (
+            "unknown" if isinstance(provider, CapabilityProvider) else "absent"
+        )
+    return SchemaCompatibilityEvidence(
+        declaration=declaration,
+        empirical="not_run",
+        verification_basis=(
+            "declaration" if declaration == "compatible" else None
+        ),
+    )
+
+
+def with_empirical_compatibility(
+    evidence: SchemaCompatibilityEvidence,
+    empirical: Literal["verified", "failed"],
+    *,
+    golden_contract_valid: bool = False,
+) -> SchemaCompatibilityEvidence:
+    basis: VerificationBasis | None = None
+    if empirical == "verified":
+        basis = "both" if evidence.declaration == "compatible" else "empirical"
+    return SchemaCompatibilityEvidence(
+        declaration=evidence.declaration,
+        empirical=empirical,
+        verification_basis=basis,
+        golden_contract_valid=golden_contract_valid,
     )

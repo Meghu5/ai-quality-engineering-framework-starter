@@ -15,8 +15,10 @@ from ai_quality.models import AirlineAssistantResponse, GoldenCase, QualityRepor
 from ai_quality.provider_capabilities import (
     ProviderCapabilityEvidence,
     ProviderCapabilityRequirement,
+    SchemaCompatibilityEvidence,
     assess_provider_capabilities,
-    supported_capability_evidence,
+    schema_compatibility_for_declaration,
+    with_empirical_compatibility,
 )
 from ai_quality.privacy import (
     _SafeIdentifier,
@@ -112,6 +114,7 @@ class ProviderConformanceReport(BaseModel):
     case_ids: tuple[str, ...] = Field(default_factory=tuple)
     failure: ProviderFailureEvidence | None = None
     capability: ProviderCapabilityEvidence | None = None
+    schema_compatibility: SchemaCompatibilityEvidence
     quality_report: _ImmutableQualityReport | None = None
     policy_passed: bool = Field(strict=True)
 
@@ -214,11 +217,18 @@ class ProviderConformanceReport(BaseModel):
                 and self.outcome != "capability_failed"
             ):
                 raise ValueError("invalid capability declaration must fail capability")
-            if (
-                self.outcome in {"passed", "quality_failed"}
-                and self.capability.status != "supported"
-            ):
-                raise ValueError("quality outcomes require supported capability")
+            declaration_by_status = {
+                "supported": {"compatible"},
+                "unsupported": {"incompatible"},
+                "schema_mismatch": {"incompatible"},
+                "unknown": {"unknown", "invalid", "absent"},
+            }
+            if self.schema_compatibility.declaration not in declaration_by_status[
+                self.capability.status
+            ]:
+                raise ValueError(
+                    "schema compatibility declaration conflicts with capability"
+                )
 
         if self.outcome == "not_configured":
             if (
@@ -262,8 +272,6 @@ class ProviderConformanceReport(BaseModel):
             ):
                 raise ValueError("transport failure category is inconsistent")
             if self.outcome in {"capability_failed", "schema_mismatch"}:
-                if self.completed_case_count != 0:
-                    raise ValueError("capability failures cannot complete golden cases")
                 if (
                     self.failure.category != FailureCategory.CONTRACT
                     or self.capability is None
@@ -271,6 +279,14 @@ class ProviderConformanceReport(BaseModel):
                     raise ValueError(
                         "capability failures require contract metadata"
                     )
+            if (
+                self.outcome == "capability_failed"
+                or (
+                    self.outcome == "schema_mismatch"
+                    and self.schema_compatibility.empirical == "failed"
+                )
+            ) and self.completed_case_count != 0:
+                raise ValueError("capability failures cannot complete golden cases")
             if self.outcome == "capability_failed" and self.capability.status not in {
                 "unsupported",
                 "unknown",
@@ -279,6 +295,8 @@ class ProviderConformanceReport(BaseModel):
             if (
                 self.outcome == "schema_mismatch"
                 and self.capability.status != "schema_mismatch"
+                and self.schema_compatibility.empirical
+                not in {"failed", "verified"}
             ):
                 raise ValueError("schema mismatch evidence is inconsistent")
 
@@ -298,8 +316,22 @@ class ProviderConformanceReport(BaseModel):
             expected_passed = self.outcome == "passed"
             if self.quality_report.overall_passed != expected_passed:
                 raise ValueError("quality outcome must match the quality report")
+            if (
+                self.schema_compatibility.empirical != "verified"
+                or not self.schema_compatibility.golden_contract_valid
+            ):
+                raise ValueError(
+                    "quality outcomes require verified schema compatibility"
+                )
         elif self.quality_report is not None:
             raise ValueError("non-quality outcomes cannot contain quality scores")
+        if (
+            self.outcome not in {"passed", "quality_failed"}
+            and self.schema_compatibility.golden_contract_valid
+        ):
+            raise ValueError(
+                "incomplete execution cannot claim golden contract validity"
+            )
         return self
 
 
@@ -446,6 +478,9 @@ class ProviderConformanceRunner:
         declared_capability = assess_provider_capabilities(
             self.provider, requirement
         )
+        schema_compatibility = schema_compatibility_for_declaration(
+            self.provider, declared_capability
+        )
         if declared_capability.status == "unsupported":
             return self._report(
                 safe_case_ids=safe_case_ids,
@@ -455,6 +490,7 @@ class ProviderConformanceRunner:
                 reason_code="provider_capability_unsupported",
                 failure=_capability_failure(),
                 capability=declared_capability,
+                schema_compatibility=schema_compatibility,
             )
         if (
             declared_capability.status == "unknown"
@@ -468,6 +504,7 @@ class ProviderConformanceRunner:
                 reason_code="provider_capability_invalid",
                 failure=_capability_failure(),
                 capability=declared_capability,
+                schema_compatibility=schema_compatibility,
             )
         if declared_capability.status == "schema_mismatch":
             return self._report(
@@ -478,10 +515,11 @@ class ProviderConformanceRunner:
                 reason_code="provider_schema_mismatch",
                 failure=_capability_failure(),
                 capability=declared_capability,
+                schema_compatibility=schema_compatibility,
             )
 
         try:
-            self.provider.generate_structured(
+            preflight_response = self.provider.generate_structured(
                 _PREFLIGHT_USER_INPUT,
                 prompt=_PREFLIGHT_PROMPT,
                 case=None,
@@ -496,6 +534,8 @@ class ProviderConformanceRunner:
                 ),
                 outcome="not_configured",
                 reason_code="provider_not_configured",
+                capability=declared_capability,
+                schema_compatibility=schema_compatibility,
             )
         except RealProviderTransportError as exc:
             return self._failure_report(
@@ -504,6 +544,9 @@ class ProviderConformanceRunner:
                 "transport_failed",
                 exc.failure,
                 capability=declared_capability,
+                schema_compatibility=with_empirical_compatibility(
+                    schema_compatibility, "failed"
+                ),
             )
         except RealProviderResponseError as exc:
             if exc.failure and exc.failure.category == FailureCategory.CONTRACT:
@@ -512,11 +555,9 @@ class ProviderConformanceRunner:
                     0,
                     "schema_mismatch",
                     exc.failure,
-                    capability=ProviderCapabilityEvidence(
-                        status="schema_mismatch",
-                        structured_output_supported=True,
-                        failure_category=FailureCategory.CONTRACT,
-                        reason_code="provider_schema_mismatch",
+                    capability=declared_capability,
+                    schema_compatibility=with_empirical_compatibility(
+                        schema_compatibility, "failed"
                     ),
                 )
             return self._failure_report(
@@ -525,6 +566,9 @@ class ProviderConformanceRunner:
                 "contract_failed",
                 exc.failure or _provider_failure(),
                 capability=declared_capability,
+                schema_compatibility=with_empirical_compatibility(
+                    schema_compatibility, "failed"
+                ),
             )
         except RealProviderError as exc:
             failure = exc.failure or _provider_failure()
@@ -540,15 +584,9 @@ class ProviderConformanceRunner:
                 0,
                 outcome,
                 failure,
-                capability=(
-                    ProviderCapabilityEvidence(
-                        status="schema_mismatch",
-                        structured_output_supported=True,
-                        failure_category=FailureCategory.CONTRACT,
-                        reason_code="provider_schema_mismatch",
-                    )
-                    if outcome == "schema_mismatch"
-                    else declared_capability
+                capability=declared_capability,
+                schema_compatibility=with_empirical_compatibility(
+                    schema_compatibility, "failed"
                 ),
             )
         except Exception:
@@ -558,14 +596,31 @@ class ProviderConformanceRunner:
                 "transport_failed",
                 _provider_failure(),
                 capability=declared_capability,
+                schema_compatibility=with_empirical_compatibility(
+                    schema_compatibility, "failed"
+                ),
             )
 
-        capability = supported_capability_evidence()
+        if _validate_structured_response(preflight_response) is None:
+            return self._failure_report(
+                safe_case_ids,
+                0,
+                "schema_mismatch",
+                _capability_failure(),
+                capability=declared_capability,
+                schema_compatibility=with_empirical_compatibility(
+                    schema_compatibility, "failed"
+                ),
+            )
+
+        schema_compatibility = with_empirical_compatibility(
+            schema_compatibility, "verified"
+        )
 
         responses: list[AirlineAssistantResponse] = []
         for case in cases:
             try:
-                response = self.provider.generate_structured(
+                runtime_response = self.provider.generate_structured(
                     case.user_input,
                     prompt=prompt,
                     case=case,
@@ -580,6 +635,8 @@ class ProviderConformanceRunner:
                     ),
                     outcome="not_configured",
                     reason_code="provider_not_configured",
+                    capability=declared_capability,
+                    schema_compatibility=schema_compatibility,
                 )
             except RealProviderTransportError as exc:
                 return self._failure_report(
@@ -587,7 +644,8 @@ class ProviderConformanceRunner:
                     len(responses),
                     "transport_failed",
                     exc.failure,
-                    capability=capability,
+                    capability=declared_capability,
+                    schema_compatibility=schema_compatibility,
                 )
             except RealProviderResponseError as exc:
                 if exc.failure and exc.failure.category == FailureCategory.CONTRACT:
@@ -596,19 +654,16 @@ class ProviderConformanceRunner:
                         len(responses),
                         "schema_mismatch",
                         exc.failure,
-                        capability=ProviderCapabilityEvidence(
-                            status="schema_mismatch",
-                            structured_output_supported=True,
-                            failure_category=FailureCategory.CONTRACT,
-                            reason_code="provider_schema_mismatch",
-                        ),
+                        capability=declared_capability,
+                        schema_compatibility=schema_compatibility,
                     )
                 return self._failure_report(
                     safe_case_ids,
                     len(responses),
                     "contract_failed",
                     exc.failure,
-                    capability=capability,
+                    capability=declared_capability,
+                    schema_compatibility=schema_compatibility,
                 )
             except RealProviderError as exc:
                 failure = exc.failure or _provider_failure()
@@ -622,16 +677,8 @@ class ProviderConformanceRunner:
                     len(responses),
                     outcome,
                     failure,
-                    capability=(
-                        ProviderCapabilityEvidence(
-                            status="schema_mismatch",
-                            structured_output_supported=True,
-                            failure_category=FailureCategory.CONTRACT,
-                            reason_code="provider_schema_mismatch",
-                        )
-                        if outcome == "schema_mismatch"
-                        else capability
-                    ),
+                    capability=declared_capability,
+                    schema_compatibility=schema_compatibility,
                 )
             except Exception:
                 return self._failure_report(
@@ -639,10 +686,26 @@ class ProviderConformanceRunner:
                     len(responses),
                     "transport_failed",
                     _provider_failure(),
-                    capability=capability,
+                    capability=declared_capability,
+                    schema_compatibility=schema_compatibility,
+                )
+            response = _validate_structured_response(runtime_response)
+            if response is None:
+                return self._failure_report(
+                    safe_case_ids,
+                    len(responses),
+                    "schema_mismatch",
+                    _capability_failure(),
+                    capability=declared_capability,
+                    schema_compatibility=schema_compatibility,
                 )
             responses.append(response)
 
+        schema_compatibility = with_empirical_compatibility(
+            schema_compatibility,
+            "verified",
+            golden_contract_valid=True,
+        )
         quality_report = self.evaluator.evaluate(cases, responses)
         outcome: ProviderConformanceOutcome = (
             "passed" if quality_report.overall_passed else "quality_failed"
@@ -654,7 +717,8 @@ class ProviderConformanceRunner:
             outcome=outcome,
             reason_code=None if outcome == "passed" else "quality_gate_failed",
             quality_report=quality_report,
-            capability=capability,
+            capability=declared_capability,
+            schema_compatibility=schema_compatibility,
         )
 
     def _failure_report(
@@ -667,6 +731,7 @@ class ProviderConformanceRunner:
         failure: ProviderFailureMetadata,
         *,
         capability: ProviderCapabilityEvidence | None = None,
+        schema_compatibility: SchemaCompatibilityEvidence | None = None,
     ) -> ProviderConformanceReport:
         return self._report(
             safe_case_ids=safe_case_ids,
@@ -676,6 +741,7 @@ class ProviderConformanceRunner:
             reason_code=_failure_reason_code(outcome, failure.category),
             failure=failure,
             capability=capability,
+            schema_compatibility=schema_compatibility,
         )
 
     def _report(
@@ -688,6 +754,7 @@ class ProviderConformanceRunner:
         reason_code: ReasonCode | None,
         failure: ProviderFailureMetadata | None = None,
         capability: ProviderCapabilityEvidence | None = None,
+        schema_compatibility: SchemaCompatibilityEvidence | None = None,
         quality_report: QualityReport | None = None,
     ) -> ProviderConformanceReport:
         return ProviderConformanceReport(
@@ -713,6 +780,10 @@ class ProviderConformanceRunner:
                 else None
             ),
             capability=capability,
+            schema_compatibility=(
+                schema_compatibility
+                or schema_compatibility_for_declaration(self.provider, capability)
+            ),
             quality_report=quality_report,
             policy_passed=self.policy.permits(outcome),
         )
@@ -792,6 +863,13 @@ def _provider_failure() -> ProviderFailureMetadata:
         attempt=1,
         max_attempts=1,
     )
+
+
+def _validate_structured_response(value: object) -> AirlineAssistantResponse | None:
+    try:
+        return AirlineAssistantResponse.model_validate(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _unavailable_failure() -> ProviderFailureMetadata:
