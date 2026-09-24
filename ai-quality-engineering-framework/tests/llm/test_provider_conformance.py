@@ -130,6 +130,8 @@ class StaticProvider(LLMProvider):
         ).response
 
     def generate_structured(self, user_input, *, prompt, case=None, context=None):
+        if case is None:
+            return _assistant_response()
         self.case_ids.append(case.id if case else "none")
         value = next(self.responses)
         if isinstance(value, BaseException):
@@ -209,6 +211,8 @@ def test_all_cases_succeed_and_quality_passes(cases, prompt):
 
     assert report.execution_status == "executed"
     assert report.outcome == "passed"
+    assert report.failure_category is None
+    assert report.reason_code is None
     assert report.quality_report.model_dump() == _quality_report(
         passed=True
     ).model_dump()
@@ -218,6 +222,7 @@ def test_all_cases_succeed_and_quality_passes(cases, prompt):
     assert report.case_ids[0] != report.case_ids[1]
     assert provider.case_ids == ["case-002", "case-001"]
     assert len(evaluator.calls) == 1
+    assert report.policy_passed is True
     assert conformance_exit_code(report) == 0
 
 
@@ -228,8 +233,12 @@ def test_all_cases_succeed_and_quality_fails(cases, prompt):
 
     assert report.execution_status == "executed"
     assert report.outcome == "quality_failed"
+    assert report.failure_category is None
+    assert report.reason_code == "quality_gate_failed"
     assert report.quality_report.overall_passed is False
     assert report.failure is None
+    assert report.completed_case_count == report.case_count
+    assert report.policy_passed is False
     assert conformance_exit_code(report) == 1
 
 
@@ -258,27 +267,31 @@ def test_health_unavailable_has_no_quality_metrics(required, cases, prompt):
 
 
 @pytest.mark.parametrize(
-    ("handler", "category", "outcome"),
+    ("handler", "category", "outcome", "reason_code"),
     [
-        (lambda request: (_ for _ in ()).throw(httpx.ReadTimeout("private timeout")), FailureCategory.TIMEOUT, "transport_failed"),
-        (lambda request: (_ for _ in ()).throw(httpx.ConnectError("private network")), FailureCategory.NETWORK, "transport_failed"),
-        (lambda request: httpx.Response(401), FailureCategory.AUTHENTICATION, "transport_failed"),
-        (lambda request: httpx.Response(403), FailureCategory.AUTHORIZATION, "transport_failed"),
-        (lambda request: httpx.Response(429), FailureCategory.RATE_LIMIT, "transport_failed"),
-        (lambda request: httpx.Response(503), FailureCategory.PROVIDER, "transport_failed"),
-        (lambda request: httpx.Response(200, content=b"not-json"), FailureCategory.PROVIDER, "contract_failed"),
-        (lambda request: _provider_payload({"intent": "missing-fields"}), FailureCategory.CONTRACT, "contract_failed"),
+        (lambda request: (_ for _ in ()).throw(httpx.ReadTimeout("private timeout")), FailureCategory.TIMEOUT, "transport_failed", "provider_timeout"),
+        (lambda request: (_ for _ in ()).throw(httpx.ConnectError("private network")), FailureCategory.NETWORK, "transport_failed", "provider_network_failed"),
+        (lambda request: httpx.Response(401), FailureCategory.AUTHENTICATION, "transport_failed", "provider_authentication_failed"),
+        (lambda request: httpx.Response(403), FailureCategory.AUTHORIZATION, "transport_failed", "provider_authorization_failed"),
+        (lambda request: httpx.Response(429), FailureCategory.RATE_LIMIT, "transport_failed", "provider_rate_limited"),
+        (lambda request: httpx.Response(503), FailureCategory.PROVIDER, "transport_failed", "provider_failed"),
+        (lambda request: httpx.Response(200, content=b"not-json"), FailureCategory.PROVIDER, "contract_failed", "provider_response_malformed"),
+        (lambda request: _provider_payload({"intent": "missing-fields"}), FailureCategory.CONTRACT, "schema_mismatch", "provider_schema_mismatch"),
     ],
 )
 def test_real_provider_failures_have_safe_states(
-    handler, category, outcome, cases, prompt
+    handler, category, outcome, reason_code, cases, prompt
 ):
     report = _run_real(handler, cases, prompt)
     assert report.execution_status == "failed"
     assert report.outcome == outcome
     assert report.failure.category == category
+    assert report.failure_category == category
+    assert report.reason_code == reason_code
     assert report.quality_report is None
     assert report.completed_case_count == 0
+    assert report.case_count == len(cases)
+    assert report.policy_passed is False
     assert conformance_exit_code(report) == 1
 
 
@@ -296,14 +309,16 @@ def test_retry_exhaustion_retains_final_attempt(cases, prompt):
     assert report.failure.retryable is True
 
 
-def test_unknown_failure_is_fail_closed_without_exception_text(cases, prompt):
+def test_generic_failure_is_normalized_without_exception_text(cases, prompt):
     evaluator = RecordingEvaluator(_quality_report(passed=True))
     provider = StaticProvider([RuntimeError("secret arbitrary exception")])
     report = _runner(provider, evaluator=evaluator).run(cases, prompt=prompt)
     serialized = serialize_provider_report(report)
     assert report.execution_status == "failed"
     assert report.outcome == "transport_failed"
-    assert report.failure.category == FailureCategory.UNKNOWN
+    assert report.failure.category == FailureCategory.PROVIDER
+    assert report.failure_category == FailureCategory.PROVIDER
+    assert report.reason_code == "provider_failed"
     assert report.quality_report is None
     assert evaluator.calls == []
     assert "secret arbitrary exception" not in serialized
@@ -466,6 +481,7 @@ def test_tracing_has_one_parent_and_one_provider_span(cases, prompt):
     assert [span.operation_name for span in spans] == [
         "llm.generation",
         "llm.generation",
+        "llm.generation",
         "provider.conformance",
     ]
     parent = spans[-1]
@@ -505,6 +521,8 @@ def test_report_and_lifecycle_evidence_are_privacy_safe(tmp_path, prompt):
         "private.person",
         "Authorization",
         "traceback",
+        "Verify structured airline response compatibility.",
+        "Return one valid structured airline assistant response.",
     ):
         assert sensitive not in serialized
 
@@ -570,6 +588,7 @@ def _report_payload(**overrides):
         "execution_status": "not_executed",
         "outcome": "not_configured",
         "reason_code": "provider_not_configured",
+        "failure_category": None,
         "case_count": 1,
         "completed_case_count": 0,
         "case_ids": ["case-1"],
@@ -578,6 +597,9 @@ def _report_payload(**overrides):
         "policy_passed": True,
     }
     payload.update(overrides)
+    if "failure" in overrides and "failure_category" not in overrides:
+        failure = overrides["failure"]
+        payload["failure_category"] = failure.category if failure else None
     return payload
 
 
@@ -589,13 +611,13 @@ def _report_payload(**overrides):
         {
             "outcome": "transport_failed",
             "execution_status": "failed",
-            "reason_code": "provider_transport_failure",
+            "reason_code": "provider_timeout",
             "policy_passed": False,
         },
         {
             "outcome": "contract_failed",
             "execution_status": "failed",
-            "reason_code": "provider_contract_failure",
+            "reason_code": "provider_response_malformed",
             "policy_passed": False,
         },
         {"policy_passed": False},
@@ -609,9 +631,9 @@ def test_invalid_incomplete_report_combinations_are_rejected(overrides):
 @pytest.mark.parametrize("outcome", ["passed", "quality_failed"])
 def test_quality_outcome_requires_real_matching_report(outcome):
     reason = (
-        "provider_conformance_passed"
+        None
         if outcome == "passed"
-        else "provider_quality_failure"
+        else "quality_gate_failed"
     )
     with pytest.raises(ValidationError):
         ProviderConformanceReport(
@@ -629,9 +651,9 @@ def test_quality_outcome_requires_real_matching_report(outcome):
 def test_quality_outcome_rejects_failure_metadata(outcome):
     quality = _quality_report(passed=outcome == "passed")
     reason = (
-        "provider_conformance_passed"
+        None
         if outcome == "passed"
-        else "provider_quality_failure"
+        else "quality_gate_failed"
     )
     with pytest.raises(ValidationError):
         ProviderConformanceReport(
@@ -658,9 +680,169 @@ def test_quality_report_case_count_must_match():
             **_report_payload(
                 execution_status="executed",
                 outcome="passed",
-                reason_code="provider_conformance_passed",
+                reason_code=None,
                 completed_case_count=1,
                 quality_report=_quality_report(passed=True),
+            )
+        )
+
+
+def test_report_rejects_cross_field_contract_violations():
+    passing_quality = _quality_report(passed=True).model_copy(
+        update={"total_cases": 1}
+    )
+    failing_quality = _quality_report(passed=False).model_copy(
+        update={"total_cases": 1}
+    )
+    network_failure = ProviderFailureEvidence(
+        category=FailureCategory.NETWORK,
+        retryable=True,
+        attempt=1,
+        max_attempts=1,
+    )
+    provider_failure = ProviderFailureEvidence(
+        category=FailureCategory.PROVIDER,
+        retryable=False,
+        attempt=1,
+        max_attempts=1,
+    )
+    invalid_payloads = [
+        _report_payload(
+            execution_status="executed", outcome="passed",
+            reason_code="provider_failed", completed_case_count=1,
+            quality_report=passing_quality,
+        ),
+        _report_payload(
+            execution_status="executed", outcome="passed", reason_code=None,
+            failure_category=FailureCategory.PROVIDER,
+            completed_case_count=1, quality_report=passing_quality,
+        ),
+        _report_payload(
+            execution_status="executed", outcome="quality_failed",
+            reason_code=None, completed_case_count=1,
+            quality_report=failing_quality, policy_passed=False,
+        ),
+        _report_payload(
+            execution_status="executed", outcome="quality_failed",
+            reason_code="quality_gate_failed",
+            failure_category=FailureCategory.PROVIDER,
+            completed_case_count=1, quality_report=failing_quality,
+            policy_passed=False,
+        ),
+        _report_payload(
+            execution_status="failed", outcome="transport_failed",
+            reason_code="provider_network_failed", failure=network_failure,
+            completed_case_count=1, policy_passed=False,
+        ),
+        _report_payload(
+            execution_status="failed", outcome="transport_failed",
+            reason_code="provider_network_failed", failure=network_failure,
+            quality_report=passing_quality, policy_passed=False,
+        ),
+        _report_payload(
+            execution_status="failed", outcome="transport_failed",
+            reason_code="provider_network_failed", failure=network_failure,
+            policy_passed=True,
+        ),
+        _report_payload(
+            execution_status="failed", outcome="contract_failed",
+            reason_code="provider_failed", failure=provider_failure,
+            policy_passed=False,
+        ),
+    ]
+
+    for payload in invalid_payloads:
+        with pytest.raises(ValidationError):
+            ProviderConformanceReport(**payload)
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        FailureCategory.CONTRACT,
+        FailureCategory.UNKNOWN,
+        FailureCategory.SAFETY,
+        FailureCategory.AUTHENTICATION,
+    ],
+)
+def test_contract_failed_rejects_every_non_provider_category(category):
+    failure = ProviderFailureEvidence(
+        category=category,
+        retryable=False,
+        attempt=1,
+        max_attempts=1,
+    )
+    with pytest.raises(ValidationError):
+        ProviderConformanceReport(
+            **_report_payload(
+                execution_status="failed",
+                outcome="contract_failed",
+                reason_code="provider_response_malformed",
+                failure=failure,
+                policy_passed=False,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        FailureCategory.UNKNOWN,
+        FailureCategory.SAFETY,
+        FailureCategory.CONTRACT,
+        FailureCategory.PII,
+        FailureCategory.TOOL,
+        FailureCategory.VALIDATION,
+        FailureCategory.PROMPT_INJECTION,
+    ],
+)
+def test_transport_failed_rejects_undocumented_categories(category):
+    failure = ProviderFailureEvidence(
+        category=category,
+        retryable=False,
+        attempt=1,
+        max_attempts=1,
+    )
+    with pytest.raises(ValidationError):
+        ProviderConformanceReport(
+            **_report_payload(
+                execution_status="failed",
+                outcome="transport_failed",
+                reason_code="provider_failed",
+                failure=failure,
+                policy_passed=False,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("category", "wrong_reason"),
+    [
+        (FailureCategory.AUTHENTICATION, "provider_network_failed"),
+        (FailureCategory.AUTHORIZATION, "provider_timeout"),
+        (FailureCategory.TIMEOUT, "provider_failed"),
+        (FailureCategory.NETWORK, "provider_authentication_failed"),
+        (FailureCategory.RATE_LIMIT, "provider_authentication_failed"),
+        (FailureCategory.PROVIDER, "provider_timeout"),
+    ],
+)
+def test_transport_failed_rejects_wrong_reason_for_allowed_category(
+    category, wrong_reason
+):
+    failure = ProviderFailureEvidence(
+        category=category,
+        retryable=False,
+        attempt=1,
+        max_attempts=1,
+    )
+    with pytest.raises(ValidationError):
+        ProviderConformanceReport(
+            **_report_payload(
+                execution_status="failed",
+                outcome="transport_failed",
+                reason_code=wrong_reason,
+                failure=failure,
+                policy_passed=False,
             )
         )
 
@@ -774,7 +956,7 @@ def test_provider_failure_requires_an_incomplete_case():
         **_report_payload(
             outcome="transport_failed",
             execution_status="failed",
-            reason_code="provider_transport_failure",
+            reason_code="provider_timeout",
             case_count=2,
             completed_case_count=1,
             case_ids=["case-1", "case-2"],
@@ -789,7 +971,7 @@ def test_provider_failure_requires_an_incomplete_case():
             **_report_payload(
                 outcome="transport_failed",
                 execution_status="failed",
-                reason_code="provider_transport_failure",
+                reason_code="provider_timeout",
                 completed_case_count=1,
                 failure=failure,
                 policy_passed=False,
@@ -951,11 +1133,11 @@ def test_actual_provider_child_span_uses_safe_model_but_request_uses_raw_model(
     trace_json = json.dumps(
         [span.model_dump(mode="json") for span in exporter.spans], sort_keys=True
     )
-    assert requested_models == [hostile_model, hostile_model]
+    assert requested_models == [hostile_model, hostile_model, hostile_model]
     assert hostile_model not in trace_json
     assert hostile_model not in serialize_provider_report(report)
-    assert len(exporter.spans) == 3
-    assert [span.operation_name for span in exporter.spans].count("llm.generation") == 2
+    assert len(exporter.spans) == 4
+    assert [span.operation_name for span in exporter.spans].count("llm.generation") == 3
     assert all(
         span.attributes.get("model_name", "").startswith("opaque-")
         for span in exporter.spans
@@ -989,7 +1171,7 @@ def test_generated_identifier_and_caller_supplied_same_string_use_distinct_paths
 
 def test_contract_failure_requires_an_incomplete_case():
     failure = ProviderFailureEvidence(
-        category=FailureCategory.CONTRACT,
+        category=FailureCategory.PROVIDER,
         retryable=False,
         attempt=1,
         max_attempts=1,
@@ -998,7 +1180,7 @@ def test_contract_failure_requires_an_incomplete_case():
         **_report_payload(
             outcome="contract_failed",
             execution_status="failed",
-            reason_code="provider_contract_failure",
+            reason_code="provider_response_malformed",
             case_count=2,
             completed_case_count=1,
             case_ids=["case-1", "case-2"],
@@ -1013,7 +1195,7 @@ def test_contract_failure_requires_an_incomplete_case():
             **_report_payload(
                 outcome="contract_failed",
                 execution_status="failed",
-                reason_code="provider_contract_failure",
+                reason_code="provider_response_malformed",
                 completed_case_count=1,
                 failure=failure,
                 policy_passed=False,

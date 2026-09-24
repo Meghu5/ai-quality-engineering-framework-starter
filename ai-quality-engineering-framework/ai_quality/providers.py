@@ -20,6 +20,11 @@ from ai_quality.models import (
     GroundingResult,
     SafetyResult,
 )
+from ai_quality.provider_capabilities import (
+    AIRLINE_RESPONSE_SCHEMA_ID,
+    AIRLINE_RESPONSE_SCHEMA_VERSION,
+    ProviderCapabilities,
+)
 from ai_quality.prompt_registry import Prompt
 from ai_quality.privacy import safe_model_label
 from ai_quality.provider_config import RealLLMProviderSettings
@@ -152,6 +157,13 @@ class DeterministicLLMProvider(LLMProvider):
 
     def health_check(self) -> bool:
         return True
+
+    def get_capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            structured_output=True,
+            response_schema_id=AIRLINE_RESPONSE_SCHEMA_ID,
+            response_schema_versions=(AIRLINE_RESPONSE_SCHEMA_VERSION,),
+        )
 
     def _classify_intent(self, text: str) -> str:
         lowered = text.lower()
@@ -355,6 +367,13 @@ class OptionalRealLLMProvider(LLMProvider):
 
     def health_check(self) -> bool:
         return self.settings.enabled and bool(self._api_key)
+
+    def get_capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            structured_output=self.settings.require_structured_output,
+            response_schema_id=AIRLINE_RESPONSE_SCHEMA_ID,
+            response_schema_versions=(AIRLINE_RESPONSE_SCHEMA_VERSION,),
+        )
 
     def generate(self, user_input: str, *, prompt: Prompt, context: str | None = None) -> str:
         return self.generate_structured(
