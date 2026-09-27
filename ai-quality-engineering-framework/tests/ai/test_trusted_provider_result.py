@@ -23,6 +23,7 @@ from ai_quality.evaluator_registry import (
 from ai_quality.execution_descriptor import TrustedExecutionDescriptor
 from ai_quality.models import AirlineAssistantResponse
 from ai_quality.prompt_registry import PromptRegistry
+from ai_quality.provider_capabilities import SchemaCompatibilityEvidence
 from ai_quality.provider_conformance import (
     ProviderConformanceReport,
     ProviderConformanceRunner,
@@ -490,6 +491,88 @@ def test_closure_reachable_function_attributes_cannot_redirect_report_authority(
     assert calls == 0
     assert result.outcome != copied_report.outcome
     assert adapted.baseline["provider_conformance"]["outcome"] == result.outcome
+
+
+@pytest.mark.parametrize(
+    ("runner_factory", "expected_outcome"),
+    [
+        (_runner, "quality_failed"),
+        (_failing_runner, "transport_failed"),
+        (
+            lambda: ProviderConformanceRunner(
+                provider=None,
+                provider_label="test-provider",
+                model_label="test-model",
+            ),
+            "not_configured",
+        ),
+    ],
+)
+def test_module_schema_resolver_replacement_cannot_redirect_trusted_execution(
+    monkeypatch,
+    runner_factory,
+    expected_outcome,
+):
+    calls = 0
+
+    def malicious_resolver(provider, capability):
+        nonlocal calls
+        calls += 1
+        return SchemaCompatibilityEvidence(
+            declaration="unknown",
+            empirical="not_run",
+        )
+
+    monkeypatch.setattr(
+        provider_conformance,
+        "schema_compatibility_for_declaration",
+        malicious_resolver,
+    )
+    runner = runner_factory()
+    result = runner.run_trusted(_descriptor())
+
+    assert calls == 0
+    assert result.outcome == expected_outcome
+    assert result.report.schema_compatibility.declaration == "absent"
+    assert result.report.provenance == result.provenance
+    assert _is_issued_trusted_result(result)
+
+
+def test_runner_schema_resolver_overrides_cannot_redirect_trusted_execution(
+    monkeypatch,
+):
+    calls = 0
+
+    def malicious_resolver(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return SchemaCompatibilityEvidence(
+            declaration="unknown",
+            empirical="not_run",
+        )
+
+    class FakeRunner(ProviderConformanceRunner):
+        schema_compatibility_for_declaration = staticmethod(malicious_resolver)
+
+    monkeypatch.setattr(
+        ProviderConformanceRunner,
+        "schema_compatibility_for_declaration",
+        staticmethod(malicious_resolver),
+        raising=False,
+    )
+    runner = FakeRunner(
+        provider=_Provider(),
+        provider_label="test-provider",
+        model_label="test-model",
+    )
+    runner.schema_compatibility_for_declaration = malicious_resolver
+    result = runner.run_trusted(_descriptor())
+
+    assert calls == 0
+    assert result.outcome == "quality_failed"
+    assert result.report.schema_compatibility.declaration == "absent"
+    assert result.report.provenance == result.provenance
+    assert _is_issued_trusted_result(result)
 
 
 def test_trusted_result_is_consumed_once_by_phase10():

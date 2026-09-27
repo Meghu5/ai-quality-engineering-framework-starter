@@ -664,6 +664,10 @@ class ProviderConformanceRunner:
             ProviderExecutionPolicy,
             Callable[..., ProviderConformanceReport],
             Callable[..., ProviderConformanceReport],
+            Callable[
+                [LLMProvider | None, ProviderCapabilityEvidence | None],
+                SchemaCompatibilityEvidence,
+            ],
         ]
         | None = None,
     ) -> ProviderConformanceReport:
@@ -672,10 +676,15 @@ class ProviderConformanceRunner:
             policy = self.policy
             report_constructor = self._report
             failure_constructor = self._failure_report
+            schema_compatibility_resolver = schema_compatibility_for_declaration
         else:
-            provider, policy, report_constructor, failure_constructor = (
-                framework_execution
-            )
+            (
+                provider,
+                policy,
+                report_constructor,
+                failure_constructor,
+                schema_compatibility_resolver,
+            ) = framework_execution
 
         if provider is None:
             return report_constructor(
@@ -724,7 +733,7 @@ class ProviderConformanceRunner:
         declared_capability = assess_provider_capabilities(
             provider, requirement
         )
-        schema_compatibility = schema_compatibility_for_declaration(
+        schema_compatibility = schema_compatibility_resolver(
             provider, declared_capability
         )
         if declared_capability.status == "unsupported":
@@ -1045,6 +1054,7 @@ def _bind_framework_trusted_execution(
     provider_execution = runner_type._execute
     conformance_run = runner_type._run
     report_validation = ProviderConformanceReport.model_validate
+    schema_compatibility_resolver = schema_compatibility_for_declaration
 
     def failure_reason(
         outcome: ProviderConformanceOutcome,
@@ -1117,7 +1127,7 @@ def _bind_framework_trusted_execution(
                     "capability": capability,
                     "schema_compatibility": (
                         kwargs.get("schema_compatibility")
-                        or schema_compatibility_for_declaration(provider, capability)
+                        or schema_compatibility_resolver(provider, capability)
                     ),
                     "quality_report": kwargs.get("quality_report"),
                     "policy_passed": policy.permits(kwargs["outcome"]),
@@ -1158,6 +1168,7 @@ def _bind_framework_trusted_execution(
                 policy,
                 report_constructor,
                 failure_constructor,
+                schema_compatibility_resolver,
             ),
         )
 
