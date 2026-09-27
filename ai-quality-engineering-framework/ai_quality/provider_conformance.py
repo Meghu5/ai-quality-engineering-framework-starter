@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core import SchemaValidator
 
 from ai_eval.models import ExecutionStatus, Phase10Report
 from ai_quality.dataset import (
@@ -1053,7 +1054,9 @@ def _bind_framework_trusted_execution(
     trusted_execution = runner_type._execute_trusted
     provider_execution = runner_type._execute
     conformance_run = runner_type._run
-    report_validation = ProviderConformanceReport.model_validate
+    report_validation = SchemaValidator(
+        ProviderConformanceReport.__pydantic_core_schema__
+    ).validate_python
     schema_compatibility_resolver = schema_compatibility_for_declaration
 
     def failure_reason(

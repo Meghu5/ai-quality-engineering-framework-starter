@@ -575,6 +575,63 @@ def test_runner_schema_resolver_overrides_cannot_redirect_trusted_execution(
     assert _is_issued_trusted_result(result)
 
 
+@pytest.mark.parametrize(
+    ("runner_factory", "expected_outcome"),
+    [
+        (_runner, "quality_failed"),
+        (_failing_runner, "transport_failed"),
+        (
+            lambda: ProviderConformanceRunner(
+                provider=None,
+                provider_label="test-provider",
+                model_label="test-model",
+            ),
+            "not_configured",
+        ),
+    ],
+)
+def test_pydantic_validator_replacement_cannot_redirect_trusted_validation(
+    monkeypatch,
+    runner_factory,
+    expected_outcome,
+):
+    _, source = _trusted_result()
+    calls = 0
+
+    class MaliciousValidator:
+        def validate_python(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return source.report
+
+    def malicious_model_validate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return source.report
+
+    monkeypatch.setattr(
+        ProviderConformanceReport,
+        "__pydantic_validator__",
+        MaliciousValidator(),
+    )
+    monkeypatch.setattr(
+        ProviderConformanceReport,
+        "model_validate",
+        malicious_model_validate,
+    )
+
+    runner = runner_factory()
+    result = runner.run_trusted(_descriptor())
+
+    assert calls == 0
+    assert result.outcome == expected_outcome
+    assert result.report.provenance == result.provenance
+    assert _is_issued_trusted_result(result)
+    if runner.provider is None:
+        assert result.execution_status == "not_executed"
+        assert result.report.completed_case_count == 0
+
+
 def test_trusted_result_is_consumed_once_by_phase10():
     _, result = _trusted_result()
 
