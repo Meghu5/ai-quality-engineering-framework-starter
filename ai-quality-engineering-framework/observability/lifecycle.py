@@ -361,13 +361,32 @@ def validate_artifact(path: Path, artifact_type: ArtifactType, schema_version: s
             spec.model_type.model_validate(item)
         return len(payload)
     if spec.model_type is not None:
-        spec.model_type.model_validate(payload)
+        validated = spec.model_type.model_validate(payload)
+        if artifact_type == ArtifactType.PHASE10_REPORT:
+            _validate_provider_conformance_evidence(validated)
         return _model_record_count(payload, artifact_type)
     if artifact_type == ArtifactType.FAILURE_SUMMARY:
         if not isinstance(payload, dict):
             raise ValueError("failure summary must contain a JSON object")
         return int(payload.get("total_tests", 0))
     raise ValueError("artifact type has no validator")
+
+
+def _validate_provider_conformance_evidence(report: Phase10Report) -> None:
+    if "provider_conformance" not in report.baseline:
+        return
+    from ai_quality.provider_conformance import ProviderConformanceReport
+
+    nested = report.baseline["provider_conformance"]
+    ProviderConformanceReport.model_validate_json(
+        json.dumps(
+            nested,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+    )
 
 
 def hash_file(path: Path, *, maximum_bytes: int = MAX_ARTIFACT_BYTES) -> str:

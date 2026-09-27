@@ -1,0 +1,31 @@
+{
+  "dataset_id": "airline-quality-golden-cases",
+  "dataset_version": "1.0",
+  "cases": [
+    {"case_id": "ai-001-flight-search", "revision": "1"},
+    {"case_id": "ai-002-flight-status", "revision": "1"},
+    {"case_id": "ai-003-booking", "revision": "1"},
+    {"case_id": "ai-004-cancellation", "revision": "1"},
+    {"case_id": "ai-005-baggage", "revision": "1"},
+    {"case_id": "ai-006-check-in", "revision": "1"},
+    {"case_id": "ai-007-seat-selection", "revision": "1"},
+    {"case_id": "ai-008-fare", "revision": "1"},
+    {"case_id": "ai-009-refund", "revision": "1"},
+    {"case_id": "ai-010-general-help", "revision": "1"},
+    {"case_id": "ai-011-unsupported", "revision": "1"},
+    {"case_id": "ai-012-ambiguous", "revision": "1"},
+    {"case_id": "ai-013-missing-origin", "revision": "1"},
+    {"case_id": "ai-014-invalid-airport", "revision": "1"},
+    {"case_id": "ai-015-invalid-date", "revision": "1"},
+    {"case_id": "ai-016-multiple-entities", "revision": "1"},
+    {"case_id": "ai-017-multi-turn", "revision": "1"},
+    {"case_id": "ai-018-safety-sensitive", "revision": "1"},
+    {"case_id": "ai-019-prompt-injection", "revision": "1"},
+    {"case_id": "ai-020-pii", "revision": "1"},
+    {"case_id": "ai-021-out-of-domain", "revision": "1"},
+    {"case_id": "ai-022-hallucination-trap", "revision": "1"},
+    {"case_id": "ai-023-unsupported-policy", "revision": "1"},
+    {"case_id": "ai-024-tool-action", "revision": "1"},
+    {"case_id": "ai-025-structured-output", "revision": "1"}
+  ]
+}

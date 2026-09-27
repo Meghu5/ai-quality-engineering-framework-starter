@@ -3,14 +3,28 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 import observability.lifecycle as lifecycle
 from ai_eval.models import EvaluationResult, FrameworkExecutionReport, Phase10Report
+from ai_quality.dataset import (
+    REGISTERED_DATASET_ID,
+    REGISTERED_DATASET_VERSION,
+    DatasetRegistry,
+)
+from ai_quality.prompt_registry import PromptRegistry
+from ai_quality.provider_conformance import (
+    ProviderConformanceReport,
+    ProviderConformanceRunner,
+)
+from ai_quality.trusted_provider_result import _is_issued_trusted_result
 from observability.analysis import analyze_operational_evidence
 from observability.ci import CiCorrelationReport, CiTestEvidence
 from observability.lifecycle import (
@@ -21,6 +35,7 @@ from observability.lifecycle import (
     build_manifest,
     create_bundle_from_existing_reports,
     finalize_run,
+    hash_file,
     plan_retention,
     prune_runs,
     stage_artifacts,
@@ -124,6 +139,28 @@ def _phase10_report() -> Phase10Report:
         results=[result],
     )
     return Phase10Report(baseline={}, frameworks=[framework], overall_passed=True)
+
+
+def _phase10_report_with_provider() -> Phase10Report:
+    provider_report = ProviderConformanceRunner(
+        provider=None,
+        provider_label="test-provider",
+        model_label="test-model",
+    ).run(
+        DatasetRegistry().resolve(
+            REGISTERED_DATASET_ID,
+            REGISTERED_DATASET_VERSION,
+        ),
+        prompt=PromptRegistry().resolve("airline_assistant", "v1"),
+    )
+    report = _phase10_report()
+    return report.model_copy(
+        update={
+            "baseline": {
+                "provider_conformance": provider_report.model_dump(mode="json")
+            }
+        }
+    )
 
 
 def _write_complete_evidence(root: Path) -> dict[ArtifactType, Path]:
@@ -379,6 +416,133 @@ def test_schema_compatibility_for_supported_artifacts(tmp_path, artifact_type):
     )
 
     assert records >= 0
+
+
+def test_phase10_lifecycle_accepts_valid_v2_provider_evidence(tmp_path):
+    report = _phase10_report_with_provider()
+    path = _write_json(
+        tmp_path / "reports" / "ai_eval" / "phase10_report.json",
+        report.model_dump(mode="json"),
+    )
+
+    records = validate_artifact(path, ArtifactType.PHASE10_REPORT, "1.0")
+    nested = ProviderConformanceReport.model_validate_json(
+        json.dumps(report.baseline["provider_conformance"])
+    )
+
+    assert records == 1
+    assert nested.schema_version == "2.0"
+    assert not _is_issued_trusted_result(nested)
+
+
+def test_phase10_lifecycle_rejects_v1_provider_evidence(tmp_path):
+    report = _phase10_report_with_provider().model_dump(mode="json")
+    report["baseline"]["provider_conformance"]["schema_version"] = "1.0"
+    path = _write_json(tmp_path / "phase10.json", report)
+
+    with pytest.raises(ValidationError, match="2.0"):
+        validate_artifact(path, ArtifactType.PHASE10_REPORT, "1.0")
+
+
+def test_phase10_lifecycle_rejects_arbitrary_provider_evidence_dictionary(tmp_path):
+    report = _phase10_report().model_dump(mode="json")
+    report["baseline"]["provider_conformance"] = {
+        "schema_version": "2.0",
+        "outcome": "passed",
+    }
+    path = _write_json(tmp_path / "phase10-arbitrary-provider.json", report)
+
+    with pytest.raises(ValidationError, match="Field required"):
+        validate_artifact(path, ArtifactType.PHASE10_REPORT, "1.0")
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "execution_descriptor_id",
+        "prompt_id",
+        "prompt_version",
+        "golden_dataset_id",
+        "golden_dataset_version",
+        "evaluator_id",
+        "evaluator_version",
+        "evaluator_policy_id",
+        "evaluator_policy_version",
+        "evaluator_policy_fingerprint",
+    ],
+)
+def test_phase10_lifecycle_rejects_removed_provider_identity_fields(
+    tmp_path, field
+):
+    report = _phase10_report_with_provider().model_dump(mode="json")
+    report["baseline"]["provider_conformance"][field] = "legacy-value"
+    path = _write_json(tmp_path / f"phase10-{field}.json", report)
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        validate_artifact(path, ArtifactType.PHASE10_REPORT, "1.0")
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "structured_output_required",
+        "capability_requirement_id",
+        "capability_requirement_version",
+    ],
+)
+def test_phase10_lifecycle_rejects_execution_policy_contract_duplicates(
+    tmp_path, field
+):
+    report = _phase10_report_with_provider().model_dump(mode="json")
+    policy = report["baseline"]["provider_conformance"]["provenance"][
+        "execution_policy"
+    ]
+    policy[field] = True if field == "structured_output_required" else "legacy-value"
+    path = _write_json(tmp_path / f"phase10-{field}.json", report)
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        validate_artifact(path, ArtifactType.PHASE10_REPORT, "1.0")
+
+
+def test_valid_v2_provider_evidence_round_trips_through_verified_bundle(tmp_path):
+    source_root = tmp_path / "reports"
+    lifecycle_root = Path(tempfile.mkdtemp(prefix="p12-v2-"))
+    report = _phase10_report_with_provider()
+    source = _write_json(
+        source_root / "ai_eval" / "phase10_report.json",
+        report.model_dump(mode="json"),
+    )
+
+    try:
+        bundle = create_bundle_from_existing_reports(
+            source_root=source_root,
+            lifecycle_root=lifecycle_root,
+            environment={"AI_OBSERVABILITY_RUN_ID": "provider-v2-round-trip"},
+            required_types=[ArtifactType.PHASE10_REPORT],
+        )
+        manifest = verify_bundle(bundle)
+        bundled = bundle / "artifacts" / "ai_eval" / "phase10_report.json"
+        payload = json.loads(bundled.read_text(encoding="utf-8"))
+        nested = payload["baseline"]["provider_conformance"]
+
+        assert nested == report.baseline["provider_conformance"]
+        assert manifest.artifacts[0].sha256 == hash_file(bundled) == hash_file(source)
+        assert not _is_issued_trusted_result(
+            ProviderConformanceReport.model_validate_json(json.dumps(nested))
+        )
+        serialized = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            "execution_descriptor_id",
+            "completed_execution",
+            "trusted_execution",
+            "_capability",
+            "Authorization",
+            "api_key",
+            "https://",
+        ):
+            assert forbidden not in serialized
+    finally:
+        shutil.rmtree(lifecycle_root, ignore_errors=True)
 
 
 def test_verify_bundle_rejects_manifest_tampering_and_path_escape(tmp_path):

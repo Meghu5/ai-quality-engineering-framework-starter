@@ -10,9 +10,15 @@ import pytest
 from pydantic import ValidationError
 
 from ai_eval.models import Phase10Report
+from ai_quality.dataset import (
+    REGISTERED_DATASET_ID,
+    REGISTERED_DATASET_VERSION,
+    DatasetRegistry,
+)
 from ai_quality.models import AirlineAssistantResponse, GoldenCase, QualityReport
+from ai_quality.execution_descriptor import TrustedExecutionDescriptor
 from ai_quality.privacy import safe_case_id, safe_model_label
-from ai_quality.prompt_registry import Prompt
+from ai_quality.prompt_registry import Prompt, PromptRegistry
 from ai_quality.provider_config import RealLLMProviderSettings
 from ai_quality.provider_capabilities import SchemaCompatibilityEvidence
 from ai_quality.provider_resilience import ProviderFailureMetadata
@@ -21,7 +27,7 @@ from ai_quality.provider_conformance import (
     ProviderConformanceReport,
     ProviderExecutionPolicy,
     ProviderFailureEvidence,
-    adapt_provider_report_to_phase10,
+    adapt_trusted_provider_result_to_phase10,
     conformance_exit_code,
     run_provider_conformance,
     serialize_provider_report,
@@ -126,6 +132,7 @@ class StaticProvider(LLMProvider):
         self.responses = iter(responses)
         self.available = available
         self.case_ids = []
+        self.prompts = []
 
     def health_check(self) -> bool:
         return self.available
@@ -136,6 +143,7 @@ class StaticProvider(LLMProvider):
         ).response
 
     def generate_structured(self, user_input, *, prompt, case=None, context=None):
+        self.prompts.append(prompt)
         if case is None:
             return _assistant_response()
         self.case_ids.append(case.id if case else "none")
@@ -153,7 +161,6 @@ class RecordingEvaluator:
     def evaluate(self, cases, responses):
         self.calls.append((list(cases), list(responses)))
         return self.report
-
 
 class RuntimeValueProvider(LLMProvider):
     def __init__(self, *, preflight_value, golden_values):
@@ -196,7 +203,6 @@ class ValidatedResponseEvaluator:
             hallucination_pass_rate=score,
             overall_passed=self.passed,
         )
-
 
 def _runtime_cases() -> list[GoldenCase]:
     return [
@@ -265,6 +271,25 @@ def _base_phase10_report() -> Phase10Report:
     )
 
 
+def _trusted_result(provider=None, *, required=False):
+    runner = _runner(provider, required=required)
+    descriptor = TrustedExecutionDescriptor.create(
+        registered_prompt=PromptRegistry().resolve("airline_assistant", "v1"),
+        registered_dataset=DatasetRegistry().resolve(
+            REGISTERED_DATASET_ID,
+            REGISTERED_DATASET_VERSION,
+        ),
+        registered_evaluator=runner.evaluator,
+        provider_settings=(
+            provider.settings if isinstance(provider, OptionalRealLLMProvider) else None
+        ),
+        provider_required=required,
+        provider_id="test-provider",
+        model_id="test-model",
+    )
+    return runner.run_trusted(descriptor)
+
+
 def test_all_cases_succeed_and_quality_passes(cases, prompt):
     evaluator = RecordingEvaluator(_quality_report(passed=True))
     provider = StaticProvider([_assistant_response(), _assistant_response()])
@@ -288,7 +313,32 @@ def test_all_cases_succeed_and_quality_passes(cases, prompt):
     assert report.schema_compatibility.empirical == "verified"
     assert report.schema_compatibility.verification_basis == "empirical"
     assert report.schema_compatibility.golden_contract_valid is True
+    assert report.provenance is not None
+    assert report.provenance.provider.provider_id == report.provider
+    assert report.provenance.provider.model_id == report.model
+    assert report.provenance.evaluation.case_count == report.case_count
+    assert report.provenance.evaluation.evaluator_id == "unregistered"
+    assert report.provenance.evaluation.evaluator_version == "0"
     assert conformance_exit_code(report) == 0
+
+
+def test_default_runner_uses_registered_evaluator(cases, prompt):
+    bundle = DatasetRegistry().resolve(
+        REGISTERED_DATASET_ID,
+        REGISTERED_DATASET_VERSION,
+    )
+    registered_prompt = PromptRegistry().resolve("airline_assistant", "v1")
+    report = _runner(
+        StaticProvider([_assistant_response()] * len(bundle.case_ids))
+    ).run(bundle, prompt=registered_prompt)
+
+    assert report.provenance.evaluation.evaluator_id == "quality-gate-evaluator"
+    assert report.provenance.evaluation.evaluator_version == "1.0"
+    assert (
+        report.provenance.evaluation.evaluator_policy_id
+        == "quality-gate-thresholds"
+    )
+    assert report.provenance.evaluation.evaluator_policy_version == "1.0"
 
 
 def test_all_cases_succeed_and_quality_fails(cases, prompt):
@@ -361,6 +411,7 @@ def test_real_provider_failures_have_safe_states(
     assert report.policy_passed is False
     assert report.schema_compatibility.empirical == "failed"
     assert report.schema_compatibility.golden_contract_valid is False
+    assert report.provenance is not None
     assert conformance_exit_code(report) == 1
 
 
@@ -623,38 +674,197 @@ def test_serialization_is_deterministic_and_labels_are_sanitized(cases, prompt):
     assert serialize_provider_report(first) == serialize_provider_report(second)
 
 
-def test_phase10_adapter_preserves_existing_sections(cases, prompt):
-    provider_report = _runner(
+def test_report_rejects_provenance_from_a_different_provider(cases, prompt):
+    report = _runner(
         StaticProvider([_assistant_response(), _assistant_response()]),
         evaluator=RecordingEvaluator(_quality_report(passed=True)),
     ).run(cases, prompt=prompt)
+    payload = report.model_dump(mode="python")
+    payload["provider"] = "provider-a"
+
+    with pytest.raises(ValidationError, match="provenance provider identity"):
+        ProviderConformanceReport.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("prompt_id", "airline_assistant"),
+        ("prompt_version", "v1"),
+        ("golden_dataset_id", "airline-quality-golden-cases"),
+        ("golden_dataset_version", "2.0"),
+        ("evaluator_id", "other-evaluator"),
+        ("evaluator_version", "2.0"),
+        ("evaluator_policy_id", "other-policy"),
+        ("evaluator_policy_version", "2.0"),
+        ("evaluator_policy_fingerprint", "evaluator-policy-" + ("1" * 64)),
+        ("execution_descriptor_id", "execution-descriptor-" + ("1" * 64)),
+    ],
+)
+def test_report_rejects_execution_identity_tampering(cases, prompt, field, value):
+    report = _runner(
+        StaticProvider([_assistant_response(), _assistant_response()]),
+        evaluator=RecordingEvaluator(_quality_report(passed=True)),
+    ).run(cases, prompt=prompt)
+    payload = report.model_dump(mode="python")
+    payload[field] = value
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        ProviderConformanceReport.model_validate(payload)
+
+
+def test_public_report_rejects_replaced_provenance(cases):
+    bundle = DatasetRegistry().resolve(
+        REGISTERED_DATASET_ID,
+        REGISTERED_DATASET_VERSION,
+    )
+    first = _runner(
+        StaticProvider([_assistant_response()] * len(bundle.case_ids)),
+    ).run(
+        bundle,
+        prompt=PromptRegistry().resolve("airline_assistant", "v1"),
+    )
+    second = _runner(
+        StaticProvider([_assistant_response()] * len(bundle.case_ids)),
+    ).run(
+        bundle,
+        prompt=PromptRegistry().resolve("airline_assistant", "v2"),
+    )
+    payload = first.model_dump(mode="python")
+    payload["provenance"] = second.provenance.model_dump(mode="python")
+
+    with pytest.raises(ValidationError, match="provenance case order"):
+        ProviderConformanceReport.model_validate(payload)
+
+
+def test_registered_execution_uses_registry_owned_prompt(cases):
+    registered = PromptRegistry().resolve("airline_assistant", "v1")
+    bundle = DatasetRegistry().resolve(
+        REGISTERED_DATASET_ID,
+        REGISTERED_DATASET_VERSION,
+    )
+    provider = StaticProvider([_assistant_response()] * len(bundle.case_ids))
+    report = _runner(provider).run(bundle, prompt=registered)
+
+    assert report.provenance.evaluation.prompt_id == "airline_assistant"
+    assert report.provenance.evaluation.prompt_version == "v1"
+    assert len(provider.prompts) == len(bundle.case_ids) + 1
+    assert all(prompt is registered.prompt for prompt in provider.prompts[1:])
+    serialized = serialize_provider_report(report)
+    assert registered.prompt.text not in serialized
+    assert registered.prompt.purpose not in serialized
+    assert "_capability" not in serialized
+    assert "registry_capability" not in serialized
+
+
+def test_matching_public_prompt_executes_without_registered_authority(cases):
+    registered = PromptRegistry().resolve("airline_assistant", "v1")
+    public = Prompt(
+        name=registered.prompt.name,
+        version=registered.prompt.version,
+        purpose=registered.prompt.purpose,
+        text=registered.prompt.text,
+    )
+    provider = StaticProvider([_assistant_response(), _assistant_response()])
+    report = _runner(
+        provider,
+        evaluator=RecordingEvaluator(_quality_report(passed=True)),
+    ).run(cases, prompt=public)
+
+    assert report.provenance.evaluation.prompt_id == "unregistered"
+    assert report.provenance.evaluation.prompt_version == "0"
+    assert len(provider.prompts) == 3
+    assert all(prompt is public for prompt in provider.prompts[1:])
+
+
+def test_registered_dataset_execution_uses_fresh_governed_cases():
+    bundle = DatasetRegistry().resolve(
+        REGISTERED_DATASET_ID,
+        REGISTERED_DATASET_VERSION,
+    )
+    caller_copy = bundle.materialize_cases()
+    governed_first_input = caller_copy[0].user_input
+    caller_copy[0].user_input = "caller-modified execution copy"
+    case_count = len(bundle.case_ids)
+    provider = StaticProvider([_assistant_response()] * case_count)
+    registered_prompt = PromptRegistry().resolve("airline_assistant", "v1")
+    report = _runner(provider).run(bundle, prompt=registered_prompt)
+
+    assert report.provenance.evaluation.golden_dataset_id == REGISTERED_DATASET_ID
+    assert (
+        report.provenance.evaluation.golden_dataset_version
+        == REGISTERED_DATASET_VERSION
+    )
+    assert provider.case_ids == list(bundle.case_ids)
+    assert bundle.materialize_cases()[0].user_input == governed_first_input
+    serialized = serialize_provider_report(report)
+    assert governed_first_input not in serialized
+    assert "caller-modified execution copy" not in serialized
+    assert "88d258e382112f5d024e21712bd3ece805925383797fc19183fa3282507691d8" not in serialized
+    assert "golden_cases.json" not in serialized
+    assert "_capability" not in serialized
+
+
+def test_caller_cloned_registered_cases_execute_as_unregistered(prompt):
+    bundle = DatasetRegistry().resolve(
+        REGISTERED_DATASET_ID,
+        REGISTERED_DATASET_VERSION,
+    )
+    cloned_cases = [case.model_copy(deep=True) for case in bundle.materialize_cases()]
+    provider = StaticProvider([_assistant_response()] * len(cloned_cases))
+    report = _runner(provider).run(cloned_cases, prompt=prompt)
+
+    assert report.execution_status == "executed"
+    assert report.provenance.evaluation.golden_dataset_id == "unregistered"
+    assert report.provenance.evaluation.golden_dataset_version == "0"
+    assert tuple(provider.case_ids) == bundle.case_ids
+
+
+def test_report_rejects_provenance_case_order_mismatch(cases, prompt):
+    report = _runner(
+        StaticProvider([_assistant_response(), _assistant_response()]),
+        evaluator=RecordingEvaluator(_quality_report(passed=True)),
+    ).run(cases, prompt=prompt)
+    payload = report.model_dump(mode="python")
+    payload["case_ids"] = list(reversed(report.case_ids))
+
+    with pytest.raises(ValidationError, match="provenance case order"):
+        ProviderConformanceReport.model_validate(payload)
+
+
+def test_phase10_adapter_preserves_existing_sections(cases, prompt):
+    trusted_result = _trusted_result()
+    provider_report = trusted_result.report
     original = _base_phase10_report()
-    adapted = adapt_provider_report_to_phase10(original, provider_report)
+    adapted = adapt_trusted_provider_result_to_phase10(original, trusted_result)
 
     assert adapted.baseline["phase8"] == original.baseline["phase8"]
     assert adapted.baseline["phase9"] == original.baseline["phase9"]
-    assert adapted.baseline["provider_conformance"]["outcome"] == "passed"
+    assert adapted.baseline["provider_conformance"]["outcome"] == "not_configured"
     assert adapted.baseline["provider_conformance"]["schema_compatibility"] == (
         provider_report.schema_compatibility.model_dump(mode="json")
+    )
+    assert adapted.baseline["provider_conformance"]["provenance"] == (
+        provider_report.provenance.model_dump(mode="json")
     )
     assert Phase10Report.model_validate(adapted.model_dump()) == adapted
 
 
 def test_failed_provider_makes_phase10_artifact_fail(cases, prompt):
-    provider_report = _runner(
-        StaticProvider([RuntimeError("failed")])
-    ).run(cases, prompt=prompt)
-    adapted = adapt_provider_report_to_phase10(_base_phase10_report(), provider_report)
+    trusted_result = _trusted_result(required=True)
+    adapted = adapt_trusted_provider_result_to_phase10(
+        _base_phase10_report(), trusted_result
+    )
     assert adapted.overall_passed is False
     assert adapted.baseline["phase8"]["overall_passed"] is True
 
 
 def test_lifecycle_accepts_report(tmp_path, cases, prompt):
-    provider_report = _runner(
-        StaticProvider([_assistant_response(), _assistant_response()]),
-        evaluator=RecordingEvaluator(_quality_report(passed=True)),
-    ).run(cases, prompt=prompt)
-    adapted = adapt_provider_report_to_phase10(_base_phase10_report(), provider_report)
+    trusted_result = _trusted_result()
+    provider_report = trusted_result.report
+    adapted = adapt_trusted_provider_result_to_phase10(
+        _base_phase10_report(), trusted_result
+    )
     source_root = tmp_path / "reports"
     artifact_path = source_root / "ai_eval" / "phase10_report.json"
     write_provider_phase10_report(artifact_path, adapted)
@@ -671,6 +881,18 @@ def test_lifecycle_accepts_report(tmp_path, cases, prompt):
         assert [item.artifact_type for item in manifest.artifacts] == [
             ArtifactType.PHASE10_REPORT
         ]
+        bundled = json.loads(
+            (
+                bundle
+                / "artifacts"
+                / "ai_eval"
+                / "phase10_report.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert (
+            bundled["baseline"]["provider_conformance"]["provenance"]
+            == provider_report.provenance.model_dump(mode="json")
+        )
     finally:
         shutil.rmtree(lifecycle_root, ignore_errors=True)
 
@@ -680,41 +902,39 @@ def test_entrypoint_writes_combined_report_and_returns_exit_code(
 ):
     output_path = tmp_path / "phase10_report.json"
     exit_code = run_provider_conformance(
-        runner=_runner(
-            StaticProvider([_assistant_response(), _assistant_response()]),
-            evaluator=RecordingEvaluator(_quality_report(passed=True)),
+        runner=_runner(None),
+        cases=DatasetRegistry().resolve(
+            REGISTERED_DATASET_ID,
+            REGISTERED_DATASET_VERSION,
         ),
-        cases=cases,
-        prompt=prompt,
+        prompt=PromptRegistry().resolve("airline_assistant", "v1"),
         phase10_report=_base_phase10_report(),
         output_path=output_path,
     )
 
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert exit_code == 0
-    assert payload["baseline"]["provider_conformance"]["outcome"] == "passed"
+    assert payload["baseline"]["provider_conformance"]["outcome"] == "not_configured"
+    assert payload["baseline"]["provider_conformance"]["provenance"] is not None
 
 
-def test_entrypoint_uses_injected_golden_case_loader(tmp_path, cases, prompt):
+def test_entrypoint_rejects_injected_unregistered_golden_case_loader(tmp_path, cases, prompt):
     loaded_paths = []
 
     def load(path):
         loaded_paths.append(path)
         return cases
 
-    exit_code = run_provider_conformance(
-        runner=_runner(
-            StaticProvider([_assistant_response(), _assistant_response()]),
-            evaluator=RecordingEvaluator(_quality_report(passed=True)),
-        ),
-        prompt=prompt,
-        phase10_report=_base_phase10_report(),
-        output_path=tmp_path / "phase10_report.json",
-        golden_cases_path=tmp_path / "golden_cases.json",
-        case_loader=load,
-    )
+    with pytest.raises(TypeError, match="registered dataset"):
+        run_provider_conformance(
+            runner=_runner(None),
+            prompt=PromptRegistry().resolve("airline_assistant", "v1"),
+            phase10_report=_base_phase10_report(),
+            output_path=tmp_path / "phase10_report.json",
+            golden_cases_path=tmp_path / "golden_cases.json",
+            case_loader=load,
+        )
 
-    assert exit_code == 0
     assert loaded_paths == [tmp_path / "golden_cases.json"]
 
 
@@ -768,19 +988,18 @@ def test_tracing_has_one_parent_and_one_provider_span(cases, prompt):
 
 
 def test_report_and_lifecycle_evidence_are_privacy_safe(tmp_path, prompt):
-    private_case = GoldenCase(
-        id="private.person@example.test",
-        category="flight_search",
-        user_input=RAW_PROMPT,
-        context=RAW_CONTEXT,
-        expected_intent="flight_search",
-    )
-
     def handler(request):
         return httpx.Response(503, text=RAW_RESPONSE)
 
-    provider_report = _run_real(handler, [private_case], prompt)
-    adapted = adapt_provider_report_to_phase10(_base_phase10_report(), provider_report)
+    provider = _real_provider(handler)
+    try:
+        trusted_result = _trusted_result(provider)
+    finally:
+        provider.close()
+    provider_report = trusted_result.report
+    adapted = adapt_trusted_provider_result_to_phase10(
+        _base_phase10_report(), trusted_result
+    )
     artifact = tmp_path / "reports" / "ai_eval" / "phase10_report.json"
     write_provider_phase10_report(artifact, adapted)
     serialized = artifact.read_text(encoding="utf-8")
@@ -794,6 +1013,8 @@ def test_report_and_lifecycle_evidence_are_privacy_safe(tmp_path, prompt):
         "private.person",
         "Authorization",
         "traceback",
+        "completed_execution",
+        "trusted_execution",
         "Verify structured airline response compatibility.",
         "Return one valid structured airline assistant response.",
     ):
@@ -1338,6 +1559,7 @@ def test_environment_required_flag_drives_execution_policy(
     assert report.required is (value == "true")
     assert report.execution_status == status
     assert report.outcome == "not_configured"
+    assert report.provenance is not None
     assert conformance_exit_code(report) == exit_code
 
 

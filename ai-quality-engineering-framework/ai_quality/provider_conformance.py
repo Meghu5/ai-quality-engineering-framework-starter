@@ -9,9 +9,35 @@ from typing import TYPE_CHECKING, Callable, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ai_eval.models import ExecutionStatus, Phase10Report
-from ai_quality.dataset import DATASET_PATH, load_golden_cases
-from ai_quality.evaluators import QualityGateEvaluator
+from ai_quality.dataset import (
+    DATASET_PATH,
+    REGISTERED_DATASET_ID,
+    REGISTERED_DATASET_VERSION,
+    DatasetRegistry,
+    RegisteredDatasetBundle,
+    dataset_for_execution,
+    load_golden_cases,
+    resolve_golden_dataset_identity,
+)
+from ai_quality.evaluator_registry import (
+    REGISTERED_EVALUATOR_ID,
+    REGISTERED_EVALUATOR_VERSION,
+    EvaluatorRegistry,
+    RegisteredEvaluator,
+)
+from ai_quality.execution_descriptor import TrustedExecutionDescriptor
 from ai_quality.models import AirlineAssistantResponse, GoldenCase, QualityReport
+from ai_quality.privacy import (
+    _SafeIdentifier,
+    safe_case_id,
+    safe_model_label,
+    safe_provider_label,
+)
+from ai_quality.prompt_registry import (
+    Prompt,
+    RegisteredPrompt,
+    prompt_for_execution,
+)
 from ai_quality.provider_capabilities import (
     ProviderCapabilityEvidence,
     ProviderCapabilityRequirement,
@@ -20,13 +46,13 @@ from ai_quality.provider_capabilities import (
     schema_compatibility_for_declaration,
     with_empirical_compatibility,
 )
-from ai_quality.privacy import (
-    _SafeIdentifier,
-    safe_case_id,
-    safe_model_label,
-    safe_provider_label,
+from ai_quality.provider_provenance import (
+    ProviderConformanceProvenance,
+    _build_provider_conformance_provenance,
+    _build_trusted_provider_conformance_provenance,
+    _ConformanceExecutionDescriptor,
+    _evaluator_declaration,
 )
-from ai_quality.prompt_registry import Prompt
 from ai_quality.provider_resilience import ProviderFailureMetadata
 from ai_quality.providers import (
     LLMProvider,
@@ -35,6 +61,12 @@ from ai_quality.providers import (
     RealProviderError,
     RealProviderResponseError,
     RealProviderTransportError,
+)
+from ai_quality.trusted_provider_result import (
+    TrustedProviderConformanceResult,
+    _consume_public_report_for_phase10,
+    _public_report_from_trusted_result,
+    _report_fingerprint,
 )
 from observability.models import FailureCategory
 from observability.tracing import TracingFacade, create_tracing_facade
@@ -101,7 +133,7 @@ class _ImmutableQualityReport(QualityReport):
 class ProviderConformanceReport(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     provider: str
     model: str
     required: bool = Field(strict=True)
@@ -115,6 +147,7 @@ class ProviderConformanceReport(BaseModel):
     failure: ProviderFailureEvidence | None = None
     capability: ProviderCapabilityEvidence | None = None
     schema_compatibility: SchemaCompatibilityEvidence
+    provenance: ProviderConformanceProvenance | None = None
     quality_report: _ImmutableQualityReport | None = None
     policy_passed: bool = Field(strict=True)
 
@@ -130,11 +163,21 @@ class ProviderConformanceReport(BaseModel):
 
     @field_validator("case_ids", mode="before")
     @classmethod
-    def sanitize_case_ids(cls, value: object) -> tuple[str, ...]:
+    def sanitize_case_ids(cls, value: object, info) -> tuple[str, ...]:
         if not isinstance(value, (list, tuple)) or any(
             not isinstance(item, (str, _SafeIdentifier)) for item in value
         ):
             raise ValueError("case_ids must be strings")
+        if info.mode == "json":
+            if any(
+                not isinstance(item, str)
+                or len(item) != 21
+                or not item.startswith("case-")
+                or any(character not in "0123456789abcdef" for character in item[5:])
+                for item in value
+            ):
+                raise ValueError("serialized case_ids must already be opaque")
+            return tuple(value)
         return tuple(
             item.value if isinstance(item, _SafeIdentifier) else safe_case_id(item).value
             for item in value
@@ -332,6 +375,38 @@ class ProviderConformanceReport(BaseModel):
             raise ValueError(
                 "incomplete execution cannot claim golden contract validity"
             )
+        if self.provenance is not None:
+            evaluation = self.provenance.evaluation
+            if (
+                self.provenance.provider.provider_id != self.provider
+                or self.provenance.provider.model_id != self.model
+            ):
+                raise ValueError("provenance provider identity is inconsistent")
+            if self.provenance.evaluation.case_count != self.case_count:
+                raise ValueError("provenance case count is inconsistent")
+            if (
+                self.provenance.contract.response_schema_id
+                != self.schema_compatibility.expected_schema_id
+                or self.provenance.contract.response_schema_version
+                != self.schema_compatibility.expected_schema_version
+                or self.provenance.contract.validator_id
+                != self.schema_compatibility.validator_id
+                or self.provenance.contract.validator_version
+                != self.schema_compatibility.validator_version
+            ):
+                raise ValueError("provenance contract identity is inconsistent")
+            if self.provenance.execution_policy.provider_required != self.required:
+                raise ValueError("provenance execution policy is inconsistent")
+            if tuple(item.case_id for item in evaluation.case_references) != self.case_ids:
+                raise ValueError("provenance case order is inconsistent")
+            if (
+                self.failure is not None
+                and self.outcome in {"transport_failed", "contract_failed"}
+                and self.provenance.execution_policy.max_attempts is not None
+                and self.failure.max_attempts
+                != self.provenance.execution_policy.max_attempts
+            ):
+                raise ValueError("failure retry policy is inconsistent")
         return self
 
 
@@ -374,7 +449,7 @@ class ProviderConformanceRunner:
         provider_label: str,
         model_label: str,
         policy: ProviderExecutionPolicy | None = None,
-        evaluator: QualityEvaluator | None = None,
+        evaluator: QualityEvaluator | RegisteredEvaluator | None = None,
         tracer: TracingFacade | None = None,
     ) -> None:
         self.provider = provider
@@ -392,13 +467,131 @@ class ProviderConformanceRunner:
         ):
             raise ValueError("injected policy conflicts with provider configuration")
         self.policy = policy or configured_policy
-        self.evaluator = evaluator or QualityGateEvaluator()
+        self.evaluator = evaluator or EvaluatorRegistry().resolve(
+            REGISTERED_EVALUATOR_ID,
+            REGISTERED_EVALUATOR_VERSION,
+        )
         self.tracer = tracer or create_tracing_facade()
 
     def run(
-        self, cases: list[GoldenCase], *, prompt: Prompt
+        self,
+        cases: list[GoldenCase] | RegisteredDatasetBundle,
+        *,
+        prompt: Prompt | RegisteredPrompt,
     ) -> ProviderConformanceReport:
-        safe_case_ids = [safe_case_id(case.id) for case in cases]
+        if (
+            isinstance(prompt, RegisteredPrompt)
+            and isinstance(cases, RegisteredDatasetBundle)
+            and isinstance(self.evaluator, RegisteredEvaluator)
+        ):
+            descriptor = TrustedExecutionDescriptor.create(
+                registered_prompt=prompt,
+                registered_dataset=cases,
+                registered_evaluator=self.evaluator,
+                provider_settings=(
+                    self.provider.settings
+                    if isinstance(self.provider, OptionalRealLLMProvider)
+                    else None
+                ),
+                provider_required=self.policy.required,
+                provider_id=self.provider_label.value,
+                model_id=self.model_label.value,
+            )
+            return _public_report_from_trusted_result(
+                self.run_trusted(descriptor)
+            )
+
+        execution_cases, _ = dataset_for_execution(cases)
+        safe_case_ids = [safe_case_id(case.id) for case in execution_cases]
+        execution_prompt = prompt_for_execution(prompt)
+        requirement = ProviderCapabilityRequirement()
+        descriptor = _ConformanceExecutionDescriptor(
+            prompt_id="unregistered",
+            prompt_version="0",
+            dataset=resolve_golden_dataset_identity(execution_cases),
+            safe_case_ids=tuple(item.value for item in safe_case_ids),
+            evaluator=_evaluator_declaration(object()),
+            provider_id=self.provider_label.value,
+            model_id=self.model_label.value,
+            settings=(
+                self.provider.settings
+                if isinstance(self.provider, OptionalRealLLMProvider)
+                else None
+            ),
+            provider_required=self.policy.required,
+            capability_requirement=requirement,
+        )
+        provenance = _build_provider_conformance_provenance(descriptor)
+        return self._execute(
+            execution_cases,
+            safe_case_ids=safe_case_ids,
+            prompt=execution_prompt,
+            evaluator=self.evaluator,
+            requirement=requirement,
+            provenance=provenance,
+        )
+
+    def run_trusted(
+        self,
+        descriptor: TrustedExecutionDescriptor,
+    ) -> TrustedProviderConformanceResult:
+        raise RuntimeError("trusted execution entry point is not bound")
+
+    def _execute_trusted(
+        self,
+        descriptor: TrustedExecutionDescriptor,
+        execute: Callable[..., ProviderConformanceReport],
+        conformance_execution: Callable[..., ProviderConformanceReport],
+        report_validation: Callable[..., ProviderConformanceReport],
+    ) -> ProviderConformanceReport:
+        expected = TrustedExecutionDescriptor.create(
+            registered_prompt=descriptor.prompt,
+            registered_dataset=descriptor.dataset,
+            registered_evaluator=descriptor.evaluator,
+            provider_settings=(
+                self.provider.settings
+                if isinstance(self.provider, OptionalRealLLMProvider)
+                else None
+            ),
+            provider_required=self.policy.required,
+            provider_id=self.provider_label.value,
+            model_id=self.model_label.value,
+        )
+        if (
+            descriptor.provider_settings != expected.provider_settings
+            or descriptor.provider_id != expected.provider_id
+            or descriptor.model_id != expected.model_id
+            or descriptor.contract != expected.contract
+        ):
+            raise ValueError("trusted descriptor conflicts with runner configuration")
+        execution_cases = descriptor.materialize_cases()
+        safe_case_ids = [safe_case_id(case.id) for case in execution_cases]
+        provenance = _build_trusted_provider_conformance_provenance(descriptor)
+        report = execute(
+            self,
+            execution_cases,
+            safe_case_ids=safe_case_ids,
+            prompt=descriptor.prompt.prompt,
+            evaluator=descriptor.evaluator,
+            requirement=descriptor.capability_requirement,
+            provenance=provenance,
+            conformance_execution=conformance_execution,
+            report_validation=report_validation,
+        )
+        return report
+
+    def _execute(
+        self,
+        cases: list[GoldenCase],
+        *,
+        safe_case_ids: list[_SafeIdentifier],
+        prompt: Prompt,
+        evaluator: QualityEvaluator | RegisteredEvaluator,
+        requirement: ProviderCapabilityRequirement,
+        provenance: ProviderConformanceProvenance,
+        conformance_execution: Callable[..., ProviderConformanceReport] | None = None,
+        report_validation: Callable[..., ProviderConformanceReport] | None = None,
+    ) -> ProviderConformanceReport:
         attributes = {
             "provider_name": self.provider_label.value,
             "model_name": self.model_label.value,
@@ -410,7 +603,42 @@ class ProviderConformanceRunner:
             operation_type="evaluation",
             attributes=attributes,
         ) as span:
-            report = self._run(cases, safe_case_ids=safe_case_ids, prompt=prompt)
+            if conformance_execution is None:
+                report = self._run(
+                    cases,
+                    safe_case_ids=safe_case_ids,
+                    prompt=prompt,
+                    evaluator=evaluator,
+                    requirement=requirement,
+                )
+            else:
+                report = conformance_execution(
+                    provider=self.provider,
+                    policy=self.policy,
+                    provider_label=self.provider_label,
+                    model_label=self.model_label,
+                    cases=cases,
+                    safe_case_ids=safe_case_ids,
+                    prompt=prompt,
+                    evaluator=evaluator,
+                    requirement=requirement,
+                )
+            validate_report = (
+                report_validation
+                if report_validation is not None
+                else ProviderConformanceReport.model_validate
+            )
+            report = validate_report(
+                {
+                    **report.model_dump(mode="python"),
+                    "provider": _SafeIdentifier(report.provider),
+                    "model": _SafeIdentifier(report.model),
+                    "case_ids": [
+                        _SafeIdentifier(case_id) for case_id in report.case_ids
+                    ],
+                    "provenance": provenance,
+                }
+            )
             span.set_attribute("evaluation_status", report.execution_status)
             if report.capability is not None:
                 span.set_attribute("capability_status", report.capability.status)
@@ -429,22 +657,41 @@ class ProviderConformanceRunner:
         *,
         safe_case_ids: list[_SafeIdentifier],
         prompt: Prompt,
+        evaluator: QualityEvaluator | RegisteredEvaluator,
+        requirement: ProviderCapabilityRequirement,
+        framework_execution: tuple[
+            LLMProvider | None,
+            ProviderExecutionPolicy,
+            Callable[..., ProviderConformanceReport],
+            Callable[..., ProviderConformanceReport],
+        ]
+        | None = None,
     ) -> ProviderConformanceReport:
-        if self.provider is None:
-            return self._report(
+        if framework_execution is None:
+            provider = self.provider
+            policy = self.policy
+            report_constructor = self._report
+            failure_constructor = self._failure_report
+        else:
+            provider, policy, report_constructor, failure_constructor = (
+                framework_execution
+            )
+
+        if provider is None:
+            return report_constructor(
                 safe_case_ids=safe_case_ids,
                 completed=0,
                 execution_status=(
-                    "provider_required" if self.policy.required else "not_executed"
+                    "provider_required" if policy.required else "not_executed"
                 ),
                 outcome="not_configured",
                 reason_code="provider_not_configured",
             )
 
         try:
-            available = self.provider.health_check()
+            available = provider.health_check()
         except Exception:
-            return self._report(
+            return report_constructor(
                 safe_case_ids=safe_case_ids,
                 completed=0,
                 execution_status="unavailable",
@@ -453,19 +700,19 @@ class ProviderConformanceRunner:
                 failure=_provider_failure(),
             )
         if not available:
-            if isinstance(self.provider, OptionalRealLLMProvider):
-                return self._report(
+            if isinstance(provider, OptionalRealLLMProvider):
+                return report_constructor(
                     safe_case_ids=safe_case_ids,
                     completed=0,
                     execution_status=(
                         "provider_required"
-                        if self.policy.required
+                        if policy.required
                         else "not_executed"
                     ),
                     outcome="not_configured",
                     reason_code="provider_not_configured",
                 )
-            return self._report(
+            return report_constructor(
                 safe_case_ids=safe_case_ids,
                 completed=0,
                 execution_status="unavailable",
@@ -474,15 +721,14 @@ class ProviderConformanceRunner:
                 failure=_unavailable_failure(),
             )
 
-        requirement = ProviderCapabilityRequirement()
         declared_capability = assess_provider_capabilities(
-            self.provider, requirement
+            provider, requirement
         )
         schema_compatibility = schema_compatibility_for_declaration(
-            self.provider, declared_capability
+            provider, declared_capability
         )
         if declared_capability.status == "unsupported":
-            return self._report(
+            return report_constructor(
                 safe_case_ids=safe_case_ids,
                 completed=0,
                 execution_status="failed",
@@ -496,7 +742,7 @@ class ProviderConformanceRunner:
             declared_capability.status == "unknown"
             and declared_capability.reason_code == "provider_capability_invalid"
         ):
-            return self._report(
+            return report_constructor(
                 safe_case_ids=safe_case_ids,
                 completed=0,
                 execution_status="failed",
@@ -507,7 +753,7 @@ class ProviderConformanceRunner:
                 schema_compatibility=schema_compatibility,
             )
         if declared_capability.status == "schema_mismatch":
-            return self._report(
+            return report_constructor(
                 safe_case_ids=safe_case_ids,
                 completed=0,
                 execution_status="failed",
@@ -519,18 +765,18 @@ class ProviderConformanceRunner:
             )
 
         try:
-            preflight_response = self.provider.generate_structured(
+            preflight_response = provider.generate_structured(
                 _PREFLIGHT_USER_INPUT,
                 prompt=_PREFLIGHT_PROMPT,
                 case=None,
                 context=None,
             )
         except RealProviderDisabledError:
-            return self._report(
+            return report_constructor(
                 safe_case_ids=safe_case_ids,
                 completed=0,
                 execution_status=(
-                    "provider_required" if self.policy.required else "not_executed"
+                    "provider_required" if policy.required else "not_executed"
                 ),
                 outcome="not_configured",
                 reason_code="provider_not_configured",
@@ -538,7 +784,7 @@ class ProviderConformanceRunner:
                 schema_compatibility=schema_compatibility,
             )
         except RealProviderTransportError as exc:
-            return self._failure_report(
+            return failure_constructor(
                 safe_case_ids,
                 0,
                 "transport_failed",
@@ -550,7 +796,7 @@ class ProviderConformanceRunner:
             )
         except RealProviderResponseError as exc:
             if exc.failure and exc.failure.category == FailureCategory.CONTRACT:
-                return self._failure_report(
+                return failure_constructor(
                     safe_case_ids,
                     0,
                     "schema_mismatch",
@@ -560,7 +806,7 @@ class ProviderConformanceRunner:
                         schema_compatibility, "failed"
                     ),
                 )
-            return self._failure_report(
+            return failure_constructor(
                 safe_case_ids,
                 0,
                 "contract_failed",
@@ -579,7 +825,7 @@ class ProviderConformanceRunner:
                 if failure.category == FailureCategory.CONTRACT
                 else "transport_failed"
             )
-            return self._failure_report(
+            return failure_constructor(
                 safe_case_ids,
                 0,
                 outcome,
@@ -590,7 +836,7 @@ class ProviderConformanceRunner:
                 ),
             )
         except Exception:
-            return self._failure_report(
+            return failure_constructor(
                 safe_case_ids,
                 0,
                 "transport_failed",
@@ -602,7 +848,7 @@ class ProviderConformanceRunner:
             )
 
         if _validate_structured_response(preflight_response) is None:
-            return self._failure_report(
+            return failure_constructor(
                 safe_case_ids,
                 0,
                 "schema_mismatch",
@@ -620,18 +866,18 @@ class ProviderConformanceRunner:
         responses: list[AirlineAssistantResponse] = []
         for case in cases:
             try:
-                runtime_response = self.provider.generate_structured(
+                runtime_response = provider.generate_structured(
                     case.user_input,
                     prompt=prompt,
                     case=case,
                     context=case.context,
                 )
             except RealProviderDisabledError:
-                return self._report(
+                return report_constructor(
                     safe_case_ids=safe_case_ids,
                     completed=len(responses),
                     execution_status=(
-                        "provider_required" if self.policy.required else "not_executed"
+                        "provider_required" if policy.required else "not_executed"
                     ),
                     outcome="not_configured",
                     reason_code="provider_not_configured",
@@ -639,7 +885,7 @@ class ProviderConformanceRunner:
                     schema_compatibility=schema_compatibility,
                 )
             except RealProviderTransportError as exc:
-                return self._failure_report(
+                return failure_constructor(
                     safe_case_ids,
                     len(responses),
                     "transport_failed",
@@ -649,7 +895,7 @@ class ProviderConformanceRunner:
                 )
             except RealProviderResponseError as exc:
                 if exc.failure and exc.failure.category == FailureCategory.CONTRACT:
-                    return self._failure_report(
+                    return failure_constructor(
                         safe_case_ids,
                         len(responses),
                         "schema_mismatch",
@@ -657,7 +903,7 @@ class ProviderConformanceRunner:
                         capability=declared_capability,
                         schema_compatibility=schema_compatibility,
                     )
-                return self._failure_report(
+                return failure_constructor(
                     safe_case_ids,
                     len(responses),
                     "contract_failed",
@@ -672,7 +918,7 @@ class ProviderConformanceRunner:
                     if failure.category == FailureCategory.CONTRACT
                     else "transport_failed"
                 )
-                return self._failure_report(
+                return failure_constructor(
                     safe_case_ids,
                     len(responses),
                     outcome,
@@ -681,7 +927,7 @@ class ProviderConformanceRunner:
                     schema_compatibility=schema_compatibility,
                 )
             except Exception:
-                return self._failure_report(
+                return failure_constructor(
                     safe_case_ids,
                     len(responses),
                     "transport_failed",
@@ -691,7 +937,7 @@ class ProviderConformanceRunner:
                 )
             response = _validate_structured_response(runtime_response)
             if response is None:
-                return self._failure_report(
+                return failure_constructor(
                     safe_case_ids,
                     len(responses),
                     "schema_mismatch",
@@ -706,11 +952,11 @@ class ProviderConformanceRunner:
             "verified",
             golden_contract_valid=True,
         )
-        quality_report = self.evaluator.evaluate(cases, responses)
+        quality_report = evaluator.evaluate(cases, responses)
         outcome: ProviderConformanceOutcome = (
             "passed" if quality_report.overall_passed else "quality_failed"
         )
-        return self._report(
+        return report_constructor(
             safe_case_ids=safe_case_ids,
             completed=len(responses),
             execution_status="executed",
@@ -789,10 +1035,192 @@ class ProviderConformanceRunner:
         )
 
 
-def adapt_provider_report_to_phase10(
+def _bind_framework_trusted_execution(
+    runner_type: type[ProviderConformanceRunner],
+) -> Callable[
+    [ProviderConformanceRunner, TrustedExecutionDescriptor],
+    TrustedProviderConformanceResult,
+]:
+    trusted_execution = runner_type._execute_trusted
+    provider_execution = runner_type._execute
+    conformance_run = runner_type._run
+    report_validation = ProviderConformanceReport.model_validate
+
+    def failure_reason(
+        outcome: ProviderConformanceOutcome,
+        category: FailureCategory | None,
+    ) -> ReasonCode | None:
+        if outcome == "schema_mismatch":
+            return "provider_schema_mismatch"
+        if outcome == "capability_failed":
+            return None
+        if outcome == "contract_failed":
+            if category == FailureCategory.PROVIDER:
+                return "provider_response_malformed"
+            return None
+        if outcome != "transport_failed":
+            return None
+        if category == FailureCategory.AUTHENTICATION:
+            return "provider_authentication_failed"
+        if category == FailureCategory.AUTHORIZATION:
+            return "provider_authorization_failed"
+        if category == FailureCategory.TIMEOUT:
+            return "provider_timeout"
+        if category == FailureCategory.NETWORK:
+            return "provider_network_failed"
+        if category == FailureCategory.RATE_LIMIT:
+            return "provider_rate_limited"
+        if category == FailureCategory.PROVIDER:
+            return "provider_failed"
+        return None
+
+    def framework_conformance_execution(
+        *,
+        provider: LLMProvider | None,
+        policy: ProviderExecutionPolicy,
+        provider_label: _SafeIdentifier,
+        model_label: _SafeIdentifier,
+        cases: list[GoldenCase],
+        safe_case_ids: list[_SafeIdentifier],
+        prompt: Prompt,
+        evaluator: QualityEvaluator | RegisteredEvaluator,
+        requirement: ProviderCapabilityRequirement,
+    ) -> ProviderConformanceReport:
+        def report_constructor(**kwargs) -> ProviderConformanceReport:
+            failure = kwargs.get("failure")
+            capability = kwargs.get("capability")
+            return report_validation(
+                {
+                    "provider": provider_label,
+                    "model": model_label,
+                    "required": policy.required,
+                    "execution_status": kwargs["execution_status"],
+                    "outcome": kwargs["outcome"],
+                    "failure_category": (
+                        failure.category if failure is not None else None
+                    ),
+                    "reason_code": kwargs["reason_code"],
+                    "case_count": len(kwargs["safe_case_ids"]),
+                    "completed_case_count": kwargs["completed"],
+                    "case_ids": kwargs["safe_case_ids"],
+                    "failure": (
+                        {
+                            "category": failure.category,
+                            "retryable": failure.retryable,
+                            "attempt": failure.attempt,
+                            "max_attempts": failure.max_attempts,
+                            "status_code": failure.status_code,
+                        }
+                        if failure is not None
+                        else None
+                    ),
+                    "capability": capability,
+                    "schema_compatibility": (
+                        kwargs.get("schema_compatibility")
+                        or schema_compatibility_for_declaration(provider, capability)
+                    ),
+                    "quality_report": kwargs.get("quality_report"),
+                    "policy_passed": policy.permits(kwargs["outcome"]),
+                }
+            )
+
+        def failure_constructor(
+            safe_case_ids: list[_SafeIdentifier],
+            completed: int,
+            outcome: Literal[
+                "transport_failed", "contract_failed", "schema_mismatch"
+            ],
+            failure: ProviderFailureMetadata,
+            *,
+            capability: ProviderCapabilityEvidence | None = None,
+            schema_compatibility: SchemaCompatibilityEvidence | None = None,
+        ) -> ProviderConformanceReport:
+            return report_constructor(
+                safe_case_ids=safe_case_ids,
+                completed=completed,
+                execution_status="failed",
+                outcome=outcome,
+                reason_code=failure_reason(outcome, failure.category),
+                failure=failure,
+                capability=capability,
+                schema_compatibility=schema_compatibility,
+            )
+
+        return conformance_run(
+            None,
+            cases,
+            safe_case_ids=safe_case_ids,
+            prompt=prompt,
+            evaluator=evaluator,
+            requirement=requirement,
+            framework_execution=(
+                provider,
+                policy,
+                report_constructor,
+                failure_constructor,
+            ),
+        )
+
+    def run_trusted(
+        self: ProviderConformanceRunner,
+        descriptor: TrustedExecutionDescriptor,
+    ) -> TrustedProviderConformanceResult:
+        if not isinstance(descriptor, TrustedExecutionDescriptor):
+            raise TypeError("run_trusted requires TrustedExecutionDescriptor")
+        report = trusted_execution(
+            self,
+            descriptor,
+            provider_execution,
+            framework_conformance_execution,
+            report_validation,
+        )
+        snapshot = report.model_copy(deep=True)
+        fingerprint = _report_fingerprint(snapshot)
+        result = object.__new__(TrustedProviderConformanceResult)
+        object.__setattr__(
+            result,
+            "_TrustedProviderConformanceResult__descriptor",
+            descriptor,
+        )
+        object.__setattr__(
+            result,
+            "_TrustedProviderConformanceResult__report",
+            snapshot,
+        )
+        object.__setattr__(
+            result,
+            "_TrustedProviderConformanceResult__phase10_consumed",
+            False,
+        )
+
+        def validates_execution(candidate: object) -> bool:
+            return (
+                candidate is result
+                and candidate.descriptor is descriptor
+                and _report_fingerprint(candidate.report) == fingerprint
+            )
+
+        object.__setattr__(
+            result,
+            "_TrustedProviderConformanceResult__execution_validator",
+            validates_execution,
+        )
+        return result
+
+    return run_trusted
+
+
+ProviderConformanceRunner.run_trusted = _bind_framework_trusted_execution(
+    ProviderConformanceRunner
+)
+del _bind_framework_trusted_execution
+
+
+def adapt_trusted_provider_result_to_phase10(
     phase10_report: Phase10Report,
-    provider_report: ProviderConformanceReport,
+    trusted_result: TrustedProviderConformanceResult,
 ) -> Phase10Report:
+    provider_report = _consume_public_report_for_phase10(trusted_result)
     baseline = dict(phase10_report.baseline)
     baseline["provider_conformance"] = provider_report.model_dump(mode="json")
     return phase10_report.model_copy(
@@ -802,6 +1230,15 @@ def adapt_provider_report_to_phase10(
                 phase10_report.overall_passed and provider_report.policy_passed
             ),
         }
+    )
+
+
+def adapt_provider_report_to_phase10(
+    phase10_report: Phase10Report,
+    provider_report: ProviderConformanceReport,
+) -> Phase10Report:
+    raise TypeError(
+        "public provider reports cannot enter the trusted Phase 10 boundary"
     )
 
 
@@ -834,26 +1271,51 @@ def conformance_exit_code(report: ProviderConformanceReport) -> int:
 def run_provider_conformance(
     *,
     runner: ProviderConformanceRunner,
-    prompt: Prompt,
+    prompt: Prompt | RegisteredPrompt,
     phase10_report: Phase10Report,
     output_path: Path,
-    cases: list[GoldenCase] | None = None,
+    cases: list[GoldenCase] | RegisteredDatasetBundle | None = None,
     golden_cases_path: Path | None = None,
     case_loader: Callable[[Path], list[GoldenCase]] = load_golden_cases,
 ) -> int:
     if cases is not None and golden_cases_path is not None:
         raise ValueError("cases and golden_cases_path are mutually exclusive")
-    resolved_cases = (
-        cases
-        if cases is not None
-        else case_loader(golden_cases_path or DATASET_PATH)
+    if cases is not None:
+        resolved_cases = cases
+    elif golden_cases_path is None and case_loader is load_golden_cases:
+        resolved_cases = DatasetRegistry().resolve(
+            REGISTERED_DATASET_ID,
+            REGISTERED_DATASET_VERSION,
+        )
+    else:
+        resolved_cases = case_loader(golden_cases_path or DATASET_PATH)
+    if not isinstance(resolved_cases, RegisteredDatasetBundle):
+        raise TypeError("trusted Phase 10 execution requires a registered dataset")
+    if not isinstance(prompt, RegisteredPrompt):
+        raise TypeError("trusted Phase 10 execution requires a registered prompt")
+    if not isinstance(runner.evaluator, RegisteredEvaluator):
+        raise TypeError("trusted Phase 10 execution requires a registered evaluator")
+    descriptor = TrustedExecutionDescriptor.create(
+        registered_prompt=prompt,
+        registered_dataset=resolved_cases,
+        registered_evaluator=runner.evaluator,
+        provider_settings=(
+            runner.provider.settings
+            if isinstance(runner.provider, OptionalRealLLMProvider)
+            else None
+        ),
+        provider_required=runner.policy.required,
+        provider_id=runner.provider_label.value,
+        model_id=runner.model_label.value,
     )
-    provider_report = runner.run(resolved_cases, prompt=prompt)
-    combined_report = adapt_provider_report_to_phase10(
-        phase10_report, provider_report
+    trusted_result = runner.run_trusted(descriptor)
+    combined_report = adapt_trusted_provider_result_to_phase10(
+        phase10_report, trusted_result
     )
     write_provider_phase10_report(output_path, combined_report)
-    return conformance_exit_code(provider_report)
+    return conformance_exit_code(
+        _public_report_from_trusted_result(trusted_result)
+    )
 
 
 def _provider_failure() -> ProviderFailureMetadata:

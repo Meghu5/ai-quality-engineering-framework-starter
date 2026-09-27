@@ -84,7 +84,6 @@ class _Evaluator:
             overall_passed=True,
         )
 
-
 class _UnknownProvider(LLMProvider):
     def __init__(self, *, preflight_error=None) -> None:
         self.calls = []
@@ -394,7 +393,11 @@ def test_hostile_schema_versions_are_normalized_without_retention(hostile_versio
     assert report.outcome == "schema_mismatch"
     assert report.schema_compatibility.declaration == "incompatible"
     assert report.schema_compatibility.empirical == "not_run"
-    assert hostile_version not in serialized
+    public_capability = json.dumps(
+        report.capability.model_dump(mode="json"), sort_keys=True
+    )
+    assert hostile_version not in public_capability
+    assert "response_schema_versions" not in serialized
     assert report.schema_compatibility.expected_schema_version == "1.0"
 
 
@@ -532,7 +535,7 @@ def test_capability_evidence_is_safe_and_deterministic():
         "status": "schema_mismatch",
         "structured_output_supported": True,
     }
-    assert "2.0" not in first
+    assert "response_schema_versions" not in first
 
 
 def test_report_rejects_supported_outcome_with_mismatched_capability():
