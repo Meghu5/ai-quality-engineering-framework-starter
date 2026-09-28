@@ -141,7 +141,8 @@ def test_runner_mints_descriptor_bound_trusted_result_after_execution():
 
     assert isinstance(result, TrustedProviderConformanceResult)
     assert _is_issued_trusted_result(result)
-    assert result.descriptor is descriptor
+    assert result.descriptor is not descriptor
+    assert result.descriptor.prompt.prompt == descriptor.prompt.prompt
     assert result.provenance == result.report.provenance
     assert result.execution_evidence_id == result.provenance.execution_evidence_id
     assert result.outcome == result.report.outcome
@@ -238,7 +239,8 @@ def test_same_descriptor_matching_provenance_and_evidence_id_are_not_authority()
 
     assert forged.provenance.execution_evidence_id == result.execution_evidence_id
     assert forged.provenance == result.provenance
-    assert result.descriptor is descriptor
+    assert result.descriptor is not descriptor
+    assert result.descriptor.prompt.prompt == descriptor.prompt.prompt
     with pytest.raises(TypeError, match="only be minted"):
         TrustedProviderConformanceResult(descriptor, forged)
 
@@ -609,6 +611,13 @@ def test_pydantic_validator_replacement_cannot_redirect_trusted_validation(
         calls += 1
         return source.report
 
+    class MaliciousReport:
+        @classmethod
+        def model_validate(cls, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return source.report
+
     monkeypatch.setattr(
         ProviderConformanceReport,
         "__pydantic_validator__",
@@ -618,6 +627,16 @@ def test_pydantic_validator_replacement_cannot_redirect_trusted_validation(
         ProviderConformanceReport,
         "model_validate",
         malicious_model_validate,
+    )
+    monkeypatch.setattr(
+        ProviderConformanceReport,
+        "__pydantic_core_schema__",
+        {"type": "any"},
+    )
+    monkeypatch.setattr(
+        provider_conformance,
+        "ProviderConformanceReport",
+        MaliciousReport,
     )
 
     runner = runner_factory()
@@ -630,6 +649,30 @@ def test_pydantic_validator_replacement_cannot_redirect_trusted_validation(
     if runner.provider is None:
         assert result.execution_status == "not_executed"
         assert result.report.completed_case_count == 0
+
+
+def test_descriptor_constructor_replacement_cannot_redirect_trusted_enrollment(
+    monkeypatch,
+):
+    descriptor = _descriptor()
+    calls = 0
+
+    def malicious_create(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("replacement descriptor constructor was used")
+
+    monkeypatch.setattr(
+        TrustedExecutionDescriptor,
+        "create",
+        malicious_create,
+    )
+    result = _runner().run_trusted(descriptor)
+
+    assert calls == 0
+    assert result.outcome == "quality_failed"
+    assert result.report.provenance == result.provenance
+    assert _is_issued_trusted_result(result)
 
 
 def test_trusted_result_is_consumed_once_by_phase10():
@@ -655,7 +698,8 @@ def test_result_and_report_snapshot_are_immutable_and_independent():
         descriptor._model_id = "substituted"
     object.__setattr__(source, "outcome", "passed")
 
-    assert result.descriptor is descriptor
+    assert result.descriptor is not descriptor
+    assert result.descriptor.prompt.prompt == descriptor.prompt.prompt
     assert result.report is not result.report.model_copy(deep=True)
     assert result.report.outcome != source.outcome
     assert _is_issued_trusted_result(result)

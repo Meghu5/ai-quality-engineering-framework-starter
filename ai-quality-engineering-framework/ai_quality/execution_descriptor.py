@@ -4,14 +4,17 @@ from dataclasses import dataclass
 
 from ai_quality.dataset import (
     RegisteredDatasetBundle,
-    _is_issued_bundle,
+    _canonicalize_registered_dataset,
 )
 from ai_quality.evaluator_registry import (
     RegisteredEvaluator,
-    _is_issued_evaluator,
+    _canonicalize_registered_evaluator,
 )
 from ai_quality.models import AirlineAssistantResponse, GoldenCase, QualityReport
-from ai_quality.prompt_registry import RegisteredPrompt, _is_issued
+from ai_quality.prompt_registry import (
+    RegisteredPrompt,
+    _canonicalize_registered_prompt,
+)
 from ai_quality.provider_capabilities import (
     AIRLINE_RESPONSE_SCHEMA_ID,
     AIRLINE_RESPONSE_SCHEMA_VERSION,
@@ -195,3 +198,60 @@ def _safe_provider_settings(
         structured_output_required=settings.require_structured_output,
         provider_required=provider_required,
     )
+
+
+def _bind_descriptor_creation(
+    descriptor_type: type[TrustedExecutionDescriptor],
+):
+    prompt_canonicalizer = _canonicalize_registered_prompt
+    dataset_canonicalizer = _canonicalize_registered_dataset
+    evaluator_canonicalizer = _canonicalize_registered_evaluator
+    settings_projector = _safe_provider_settings
+    contract = _CONTRACT_CONSTANTS
+
+    def create(
+        cls,
+        *,
+        registered_prompt: RegisteredPrompt,
+        registered_dataset: RegisteredDatasetBundle,
+        registered_evaluator: RegisteredEvaluator,
+        provider_settings: RealLLMProviderSettings | None,
+        provider_required: bool,
+        provider_id: str,
+        model_id: str,
+    ) -> TrustedExecutionDescriptor:
+        canonical_prompt = prompt_canonicalizer(registered_prompt)
+        canonical_dataset = dataset_canonicalizer(registered_dataset)
+        canonical_evaluator = evaluator_canonicalizer(registered_evaluator)
+        if not isinstance(provider_required, bool):
+            raise TypeError("provider_required must be a boolean")
+        safe_settings = settings_projector(
+            provider_settings,
+            provider_required=provider_required,
+        )
+        if not isinstance(provider_id, str) or not provider_id:
+            raise ValueError("provider_id must be a safe non-empty identifier")
+        if not isinstance(model_id, str) or not model_id:
+            raise ValueError("model_id must be a safe non-empty identifier")
+        descriptor = object.__new__(descriptor_type)
+        object.__setattr__(descriptor, "_prompt", canonical_prompt)
+        object.__setattr__(descriptor, "_dataset", canonical_dataset)
+        object.__setattr__(descriptor, "_evaluator", canonical_evaluator)
+        object.__setattr__(descriptor, "_provider_settings", safe_settings)
+        object.__setattr__(descriptor, "_provider_id", provider_id)
+        object.__setattr__(descriptor, "_model_id", model_id)
+        object.__setattr__(
+            descriptor,
+            "_capability_requirement",
+            ProviderCapabilityRequirement(),
+        )
+        object.__setattr__(descriptor, "_contract", contract)
+        return descriptor
+
+    return classmethod(create)
+
+
+TrustedExecutionDescriptor.create = _bind_descriptor_creation(
+    TrustedExecutionDescriptor
+)
+del _bind_descriptor_creation

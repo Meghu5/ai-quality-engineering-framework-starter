@@ -749,7 +749,8 @@ def test_registered_execution_uses_registry_owned_prompt(cases):
     assert report.provenance.evaluation.prompt_id == "airline_assistant"
     assert report.provenance.evaluation.prompt_version == "v1"
     assert len(provider.prompts) == len(bundle.case_ids) + 1
-    assert all(prompt is registered.prompt for prompt in provider.prompts[1:])
+    assert all(prompt == registered.prompt for prompt in provider.prompts[1:])
+    assert all(prompt is not registered.prompt for prompt in provider.prompts[1:])
     serialized = serialize_provider_report(report)
     assert registered.prompt.text not in serialized
     assert registered.prompt.purpose not in serialized

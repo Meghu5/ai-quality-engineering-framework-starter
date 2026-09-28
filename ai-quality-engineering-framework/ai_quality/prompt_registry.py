@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from weakref import WeakKeyDictionary
 
 
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "ai" / "prompts"
@@ -27,7 +26,7 @@ class Prompt:
 
 
 class RegisteredPrompt:
-    __slots__ = ("_prompt", "_capability", "__weakref__")
+    __slots__ = ("_prompt", "_enrollment_proof", "__weakref__")
 
     def __new__(cls, *args, **kwargs):
         raise TypeError("registered prompts must be resolved by PromptRegistry")
@@ -46,9 +45,6 @@ class RegisteredPrompt:
         )
 
 
-_ISSUED_PROMPTS: WeakKeyDictionary[RegisteredPrompt, object] = WeakKeyDictionary()
-
-
 class PromptRegistry:
     def __init__(self, prompt_dir: Path = PROMPT_DIR) -> None:
         self.prompt_dir = prompt_dir
@@ -63,22 +59,6 @@ class PromptRegistry:
             purpose=metadata.get("purpose", "airline assistant prompt"),
             text=text,
         )
-
-    def resolve(self, name: str, version: str) -> RegisteredPrompt:
-        path = _REGISTERED_PROMPT_PATHS.get((name, version))
-        if path is None:
-            raise KeyError("prompt registration not found")
-        text = path.read_text(encoding="utf-8")
-        metadata = self._metadata(text)
-        if metadata.get("name") != name or metadata.get("version") != version:
-            raise ValueError("registered prompt metadata is inconsistent")
-        prompt = Prompt(
-            name=name,
-            version=version,
-            purpose=metadata.get("purpose", "airline assistant prompt"),
-            text=text,
-        )
-        return _issue_registered_prompt(prompt)
 
     def _metadata(self, text: str) -> dict[str, str]:
         metadata: dict[str, str] = {}
@@ -109,14 +89,84 @@ def prompt_for_execution(prompt: Prompt | RegisteredPrompt) -> Prompt:
     raise TypeError("prompt must be Prompt or RegisteredPrompt")
 
 
-def _issue_registered_prompt(prompt: Prompt) -> RegisteredPrompt:
-    handle = object.__new__(RegisteredPrompt)
-    object.__setattr__(handle, "_prompt", prompt)
-    capability = object()
-    object.__setattr__(handle, "_capability", capability)
-    _ISSUED_PROMPTS[handle] = capability
-    return handle
+def _bind_prompt_enrollment():
+    registrations = MappingProxyType(dict(_REGISTERED_PROMPT_PATHS))
+    metadata_parser = PromptRegistry._metadata
+    prompt_constructor = Prompt
+
+    class EnrollmentProof:
+        __slots__ = ("_validator",)
+
+        def __new__(cls, *args, **kwargs):
+            raise TypeError("prompt enrollment proofs are framework-owned")
+
+        def __setattr__(self, name: str, value: object) -> None:
+            raise AttributeError("prompt enrollment proofs are immutable")
+
+        def validates(self, candidate: object) -> bool:
+            return self._validator(candidate)
+
+    def build_canonical(
+        name: str,
+        version: str,
+    ) -> RegisteredPrompt:
+        path = registrations.get((name, version))
+        if path is None:
+            raise KeyError("prompt registration not found")
+        text = path.read_text(encoding="utf-8")
+        metadata = metadata_parser(None, text)
+        if metadata.get("name") != name or metadata.get("version") != version:
+            raise ValueError("registered prompt metadata is inconsistent")
+        prompt = prompt_constructor(
+            name=name,
+            version=version,
+            purpose=metadata.get("purpose", "airline assistant prompt"),
+            text=text,
+        )
+        handle = object.__new__(RegisteredPrompt)
+        object.__setattr__(handle, "_prompt", prompt)
+        proof = object.__new__(EnrollmentProof)
+
+        def validates(candidate: object) -> bool:
+            return candidate is handle and candidate.prompt is prompt
+
+        object.__setattr__(proof, "_validator", validates)
+        object.__setattr__(handle, "_enrollment_proof", proof)
+        return handle
+
+    def resolve(
+        self: PromptRegistry,
+        name: str,
+        version: str,
+    ) -> RegisteredPrompt:
+        return build_canonical(name, version)
+
+    def canonicalize(prompt: RegisteredPrompt) -> RegisteredPrompt:
+        if not isinstance(prompt, RegisteredPrompt):
+            raise ValueError("trusted descriptor requires a prompt identity request")
+        try:
+            requested = prompt._prompt
+            if not isinstance(requested, prompt_constructor):
+                raise TypeError
+            name = requested.name
+            version = requested.version
+        except (AttributeError, TypeError):
+            raise ValueError(
+                "trusted descriptor requires a valid prompt identity request"
+            ) from None
+        return build_canonical(name, version)
+
+    def is_issued(prompt: RegisteredPrompt) -> bool:
+        try:
+            proof = prompt._enrollment_proof
+            return isinstance(proof, EnrollmentProof) and proof.validates(prompt)
+        except (AttributeError, TypeError):
+            return False
+
+    return resolve, is_issued, canonicalize
 
 
-def _is_issued(prompt: RegisteredPrompt) -> bool:
-    return _ISSUED_PROMPTS.get(prompt) is prompt._capability
+PromptRegistry.resolve, _is_issued, _canonicalize_registered_prompt = (
+    _bind_prompt_enrollment()
+)
+del _bind_prompt_enrollment

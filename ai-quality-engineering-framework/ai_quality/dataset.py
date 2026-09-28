@@ -5,7 +5,6 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -60,7 +59,7 @@ class RegisteredDatasetBundle:
     __slots__ = (
         "_identity",
         "_canonical_source",
-        "_capability",
+        "_enrollment_proof",
         "__weakref__",
     )
 
@@ -101,9 +100,6 @@ class RegisteredDatasetBundle:
         )
 
 
-_ISSUED_DATASETS: WeakKeyDictionary[RegisteredDatasetBundle, object] = (
-    WeakKeyDictionary()
-)
 _REGISTERED_DATASETS = MappingProxyType(
     {
         (REGISTERED_DATASET_ID, REGISTERED_DATASET_VERSION): (
@@ -118,27 +114,7 @@ _REGISTERED_DATASETS = MappingProxyType(
 
 class DatasetRegistry:
     def resolve(self, name: str, version: str) -> RegisteredDatasetBundle:
-        registration = _REGISTERED_DATASETS.get((name, version))
-        if registration is None:
-            raise KeyError("dataset registration not found")
-        manifest = load_golden_dataset_identity()
-        if manifest.dataset_id != name or manifest.dataset_version != version:
-            raise ValueError("registered dataset manifest identity is inconsistent")
-        manifest_revisions = tuple(
-            (item.case_id, item.revision) for item in manifest.cases
-        )
-        if manifest_revisions != registration.case_revisions:
-            raise ValueError("registered dataset revision declaration is inconsistent")
-        raw_cases = _load_raw_cases(DATASET_PATH)
-        if tuple(case["id"] for case in raw_cases) != tuple(
-            item.case_id for item in manifest.cases
-        ):
-            raise ValueError("registered dataset case order is inconsistent")
-        actual_integrity = _dataset_integrity_digest(manifest, raw_cases)
-        if actual_integrity != registration.integrity_digest:
-            raise ValueError("registered dataset integrity validation failed")
-        canonical_source = _canonical_json(raw_cases)
-        return _issue_registered_dataset(manifest, canonical_source)
+        raise RuntimeError("dataset enrollment entry point is not bound")
 
 
 def load_golden_dataset_identity(
@@ -194,23 +170,6 @@ def dataset_for_execution(
     raise TypeError("cases must be a list of GoldenCase or RegisteredDatasetBundle")
 
 
-def _issue_registered_dataset(
-    identity: GoldenDatasetIdentity,
-    canonical_source: str,
-) -> RegisteredDatasetBundle:
-    bundle = object.__new__(RegisteredDatasetBundle)
-    object.__setattr__(bundle, "_identity", identity)
-    object.__setattr__(bundle, "_canonical_source", canonical_source)
-    capability = object()
-    object.__setattr__(bundle, "_capability", capability)
-    _ISSUED_DATASETS[bundle] = capability
-    return bundle
-
-
-def _is_issued_bundle(bundle: RegisteredDatasetBundle) -> bool:
-    return _ISSUED_DATASETS.get(bundle) is bundle._capability
-
-
 def _load_raw_cases(path: Path) -> list[dict[str, object]]:
     raw_cases = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw_cases, list) or any(
@@ -242,3 +201,102 @@ def _canonical_json(value: object) -> str:
         ensure_ascii=True,
         allow_nan=False,
     )
+
+
+def _bind_dataset_enrollment():
+    registrations = MappingProxyType(dict(_REGISTERED_DATASETS))
+    manifest_loader = load_golden_dataset_identity
+    raw_loader = _load_raw_cases
+    integrity_digest = _dataset_integrity_digest
+    canonical_json = _canonical_json
+    dataset_path = DATASET_PATH
+    manifest_path = DATASET_MANIFEST_PATH
+
+    class EnrollmentProof:
+        __slots__ = ("_validator",)
+
+        def __new__(cls, *args, **kwargs):
+            raise TypeError("dataset enrollment proofs are framework-owned")
+
+        def __setattr__(self, name: str, value: object) -> None:
+            raise AttributeError("dataset enrollment proofs are immutable")
+
+        def validates(self, candidate: object) -> bool:
+            return self._validator(candidate)
+
+    def build_canonical(
+        name: str,
+        version: str,
+    ) -> RegisteredDatasetBundle:
+        registration = registrations.get((name, version))
+        if registration is None:
+            raise KeyError("dataset registration not found")
+        manifest = manifest_loader(manifest_path)
+        if manifest.dataset_id != name or manifest.dataset_version != version:
+            raise ValueError("registered dataset manifest identity is inconsistent")
+        manifest_revisions = tuple(
+            (item.case_id, item.revision) for item in manifest.cases
+        )
+        if manifest_revisions != registration.case_revisions:
+            raise ValueError("registered dataset revision declaration is inconsistent")
+        raw_cases = raw_loader(dataset_path)
+        if tuple(case["id"] for case in raw_cases) != tuple(
+            item.case_id for item in manifest.cases
+        ):
+            raise ValueError("registered dataset case order is inconsistent")
+        actual_integrity = integrity_digest(manifest, raw_cases)
+        if actual_integrity != registration.integrity_digest:
+            raise ValueError("registered dataset integrity validation failed")
+        canonical_source = canonical_json(raw_cases)
+        bundle = object.__new__(RegisteredDatasetBundle)
+        object.__setattr__(bundle, "_identity", manifest)
+        object.__setattr__(bundle, "_canonical_source", canonical_source)
+        proof = object.__new__(EnrollmentProof)
+
+        def validates(candidate: object) -> bool:
+            return (
+                candidate is bundle
+                and candidate._identity is manifest
+                and candidate._canonical_source is canonical_source
+            )
+
+        object.__setattr__(proof, "_validator", validates)
+        object.__setattr__(bundle, "_enrollment_proof", proof)
+        return bundle
+
+    def resolve(
+        self: DatasetRegistry,
+        name: str,
+        version: str,
+    ) -> RegisteredDatasetBundle:
+        return build_canonical(name, version)
+
+    def canonicalize(bundle: RegisteredDatasetBundle) -> RegisteredDatasetBundle:
+        if not isinstance(bundle, RegisteredDatasetBundle):
+            raise ValueError("trusted descriptor requires a dataset identity request")
+        try:
+            identity = bundle._identity
+            if not isinstance(identity, GoldenDatasetIdentity):
+                raise TypeError
+            name = identity.dataset_id
+            version = identity.dataset_version
+        except (AttributeError, TypeError):
+            raise ValueError(
+                "trusted descriptor requires a valid dataset identity request"
+            ) from None
+        return build_canonical(name, version)
+
+    def is_issued(bundle: RegisteredDatasetBundle) -> bool:
+        try:
+            proof = bundle._enrollment_proof
+            return isinstance(proof, EnrollmentProof) and proof.validates(bundle)
+        except (AttributeError, TypeError):
+            return False
+
+    return resolve, is_issued, canonicalize
+
+
+DatasetRegistry.resolve, _is_issued_bundle, _canonicalize_registered_dataset = (
+    _bind_dataset_enrollment()
+)
+del _bind_dataset_enrollment

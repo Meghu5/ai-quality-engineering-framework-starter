@@ -544,8 +544,9 @@ class ProviderConformanceRunner:
         execute: Callable[..., ProviderConformanceReport],
         conformance_execution: Callable[..., ProviderConformanceReport],
         report_validation: Callable[..., ProviderConformanceReport],
+        descriptor_create: Callable[..., TrustedExecutionDescriptor],
     ) -> ProviderConformanceReport:
-        expected = TrustedExecutionDescriptor.create(
+        expected = descriptor_create(
             registered_prompt=descriptor.prompt,
             registered_dataset=descriptor.dataset,
             registered_evaluator=descriptor.evaluator,
@@ -565,6 +566,7 @@ class ProviderConformanceRunner:
             or descriptor.contract != expected.contract
         ):
             raise ValueError("trusted descriptor conflicts with runner configuration")
+        descriptor = expected
         execution_cases = descriptor.materialize_cases()
         safe_case_ids = [safe_case_id(case.id) for case in execution_cases]
         provenance = _build_trusted_provider_conformance_provenance(descriptor)
@@ -1058,6 +1060,7 @@ def _bind_framework_trusted_execution(
         ProviderConformanceReport.__pydantic_core_schema__
     ).validate_python
     schema_compatibility_resolver = schema_compatibility_for_declaration
+    descriptor_create = TrustedExecutionDescriptor.create
 
     def failure_reason(
         outcome: ProviderConformanceOutcome,
@@ -1181,12 +1184,26 @@ def _bind_framework_trusted_execution(
     ) -> TrustedProviderConformanceResult:
         if not isinstance(descriptor, TrustedExecutionDescriptor):
             raise TypeError("run_trusted requires TrustedExecutionDescriptor")
+        canonical_descriptor = descriptor_create(
+            registered_prompt=descriptor.prompt,
+            registered_dataset=descriptor.dataset,
+            registered_evaluator=descriptor.evaluator,
+            provider_settings=(
+                self.provider.settings
+                if isinstance(self.provider, OptionalRealLLMProvider)
+                else None
+            ),
+            provider_required=self.policy.required,
+            provider_id=self.provider_label.value,
+            model_id=self.model_label.value,
+        )
         report = trusted_execution(
             self,
-            descriptor,
+            canonical_descriptor,
             provider_execution,
             framework_conformance_execution,
             report_validation,
+            descriptor_create,
         )
         snapshot = report.model_copy(deep=True)
         fingerprint = _report_fingerprint(snapshot)
@@ -1194,7 +1211,7 @@ def _bind_framework_trusted_execution(
         object.__setattr__(
             result,
             "_TrustedProviderConformanceResult__descriptor",
-            descriptor,
+            canonical_descriptor,
         )
         object.__setattr__(
             result,
@@ -1210,7 +1227,7 @@ def _bind_framework_trusted_execution(
         def validates_execution(candidate: object) -> bool:
             return (
                 candidate is result
-                and candidate.descriptor is descriptor
+                and candidate.descriptor is canonical_descriptor
                 and _report_fingerprint(candidate.report) == fingerprint
             )
 

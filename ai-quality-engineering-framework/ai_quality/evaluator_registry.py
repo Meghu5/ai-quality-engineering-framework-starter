@@ -6,7 +6,6 @@ import math
 from dataclasses import asdict, dataclass
 from types import MappingProxyType
 from typing import Callable
-from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -51,7 +50,7 @@ class RegisteredEvaluator:
         "_declaration",
         "_evaluator",
         "_policy",
-        "_capability",
+        "_enrollment_proof",
         "__weakref__",
     )
 
@@ -140,11 +139,6 @@ _REGISTERED_EVALUATORS = MappingProxyType(
         )
     }
 )
-_ISSUED_EVALUATORS: WeakKeyDictionary[RegisteredEvaluator, object] = (
-    WeakKeyDictionary()
-)
-
-
 class EvaluatorRegistry:
     def resolve(
         self,
@@ -153,26 +147,7 @@ class EvaluatorRegistry:
         *,
         policy: AIQualityThresholds | None = None,
     ) -> RegisteredEvaluator:
-        registration = _REGISTERED_EVALUATORS.get(
-            (evaluator_id, evaluator_version)
-        )
-        if registration is None:
-            raise KeyError("evaluator registration not found")
-        projected = registration.policy_projector(policy or registration.policy)
-        governed = registration.policy_projector(registration.policy)
-        if projected != governed:
-            raise ValueError(
-                "registered evaluator policy change requires a governed version"
-            )
-        evaluator = registration.factory(projected)
-        declaration = EvaluatorProvenanceDeclaration(
-            evaluator_id=registration.evaluator_id,
-            evaluator_version=registration.evaluator_version,
-            policy_id=registration.policy_id,
-            policy_version=registration.policy_version,
-            policy_fingerprint=_policy_fingerprint(projected),
-        )
-        return _issue_registered_evaluator(evaluator, declaration, projected)
+        raise RuntimeError("evaluator enrollment entry point is not bound")
 
 
 def evaluator_provenance_for(evaluator: object) -> EvaluatorProvenanceDeclaration:
@@ -189,25 +164,6 @@ def evaluator_provenance_for(evaluator: object) -> EvaluatorProvenanceDeclaratio
     )
 
 
-def _issue_registered_evaluator(
-    evaluator: QualityGateEvaluator,
-    declaration: EvaluatorProvenanceDeclaration,
-    policy: AIQualityThresholds,
-) -> RegisteredEvaluator:
-    handle = object.__new__(RegisteredEvaluator)
-    object.__setattr__(handle, "_evaluator", evaluator)
-    object.__setattr__(handle, "_declaration", declaration)
-    object.__setattr__(handle, "_policy", policy)
-    capability = object()
-    object.__setattr__(handle, "_capability", capability)
-    _ISSUED_EVALUATORS[handle] = capability
-    return handle
-
-
-def _is_issued_evaluator(evaluator: RegisteredEvaluator) -> bool:
-    return _ISSUED_EVALUATORS.get(evaluator) is evaluator._capability
-
-
 def _policy_fingerprint(value: object) -> str:
     if isinstance(value, AIQualityThresholds):
         value = asdict(value)
@@ -220,3 +176,123 @@ def _policy_fingerprint(value: object) -> str:
     )
     digest = hashlib.sha256(canonical.encode("ascii")).hexdigest()
     return f"evaluator-policy-{digest}"
+
+
+def _bind_evaluator_enrollment():
+    registrations = MappingProxyType(
+        {
+            key: (
+                registration.evaluator_id,
+                registration.evaluator_version,
+                registration.policy_id,
+                registration.policy_version,
+                tuple(asdict(registration.policy).items()),
+            )
+            for key, registration in _REGISTERED_EVALUATORS.items()
+        }
+    )
+    policy_fingerprint = _policy_fingerprint
+    evaluator_constructor = QualityGateEvaluator
+    policy_constructor = AIQualityThresholds
+
+    class EnrollmentProof:
+        __slots__ = ("_validator",)
+
+        def __new__(cls, *args, **kwargs):
+            raise TypeError("evaluator enrollment proofs are framework-owned")
+
+        def __setattr__(self, name: str, value: object) -> None:
+            raise AttributeError("evaluator enrollment proofs are immutable")
+
+        def validates(self, candidate: object) -> bool:
+            return self._validator(candidate)
+
+    def build_canonical(
+        evaluator_id: str,
+        evaluator_version: str,
+        *,
+        policy: AIQualityThresholds | None = None,
+    ) -> RegisteredEvaluator:
+        registration = registrations.get((evaluator_id, evaluator_version))
+        if registration is None:
+            raise KeyError("evaluator registration not found")
+        (
+            governed_evaluator_id,
+            governed_evaluator_version,
+            policy_id,
+            policy_version,
+            governed_policy_items,
+        ) = registration
+        governed_policy = policy_constructor(**dict(governed_policy_items))
+        if policy is not None and policy != governed_policy:
+            raise ValueError(
+                "registered evaluator policy change requires a governed version"
+            )
+        evaluator = evaluator_constructor(governed_policy)
+        declaration = EvaluatorProvenanceDeclaration(
+            evaluator_id=governed_evaluator_id,
+            evaluator_version=governed_evaluator_version,
+            policy_id=policy_id,
+            policy_version=policy_version,
+            policy_fingerprint=policy_fingerprint(governed_policy),
+        )
+        handle = object.__new__(RegisteredEvaluator)
+        object.__setattr__(handle, "_evaluator", evaluator)
+        object.__setattr__(handle, "_declaration", declaration)
+        object.__setattr__(handle, "_policy", governed_policy)
+        proof = object.__new__(EnrollmentProof)
+
+        def validates(candidate: object) -> bool:
+            return (
+                candidate is handle
+                and candidate._evaluator is evaluator
+                and candidate._declaration is declaration
+                and candidate._policy is governed_policy
+            )
+
+        object.__setattr__(proof, "_validator", validates)
+        object.__setattr__(handle, "_enrollment_proof", proof)
+        return handle
+
+    def resolve(
+        self: EvaluatorRegistry,
+        evaluator_id: str,
+        evaluator_version: str,
+        *,
+        policy: AIQualityThresholds | None = None,
+    ) -> RegisteredEvaluator:
+        return build_canonical(
+            evaluator_id,
+            evaluator_version,
+            policy=policy,
+        )
+
+    def canonicalize(evaluator: RegisteredEvaluator) -> RegisteredEvaluator:
+        if not isinstance(evaluator, RegisteredEvaluator):
+            raise ValueError("trusted descriptor requires an evaluator identity request")
+        try:
+            declaration = evaluator._declaration
+            if not isinstance(declaration, EvaluatorProvenanceDeclaration):
+                raise TypeError
+            evaluator_id = declaration.evaluator_id
+            evaluator_version = declaration.evaluator_version
+        except (AttributeError, TypeError):
+            raise ValueError(
+                "trusted descriptor requires a valid evaluator identity request"
+            ) from None
+        return build_canonical(evaluator_id, evaluator_version)
+
+    def is_issued(evaluator: RegisteredEvaluator) -> bool:
+        try:
+            proof = evaluator._enrollment_proof
+            return isinstance(proof, EnrollmentProof) and proof.validates(evaluator)
+        except (AttributeError, TypeError):
+            return False
+
+    return resolve, is_issued, canonicalize
+
+
+EvaluatorRegistry.resolve, _is_issued_evaluator, _canonicalize_registered_evaluator = (
+    _bind_evaluator_enrollment()
+)
+del _bind_evaluator_enrollment

@@ -144,7 +144,7 @@ def test_forged_capability_is_rejected():
     object.__setattr__(forged, "_declaration", legitimate._declaration)
     object.__setattr__(forged, "_evaluator", legitimate._evaluator)
     object.__setattr__(forged, "_policy", legitimate._policy)
-    object.__setattr__(forged, "_capability", object())
+    object.__setattr__(forged, "_enrollment_proof", object())
 
     with pytest.raises(ValueError, match="capability is invalid"):
         evaluator_provenance_for(forged)
